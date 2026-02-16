@@ -1,0 +1,962 @@
+/**
+ * OpenCode Adapter for PsychMem
+ * 
+ * Handles OpenCode-specific event mapping and message processing:
+ * - Maps OpenCode events to PsychMem hooks
+ * - Processes messages incrementally using messageWatermark
+ * - Formats and injects memories into OpenCode context
+ */
+
+import { appendFileSync, mkdirSync, existsSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
+import type {
+  OpenCodePluginContext,
+  OpenCodePluginHooks,
+  OpenCodeMessageContainer,
+  OpenCodeMessagePart,
+  OpenCodeClient,
+  OpenCodeToolInput,
+  OpenCodeToolOutput,
+  OpenCodeCompactionInput,
+  OpenCodeMessageUpdatedEvent,
+  PsychMemAdapter,
+} from '../types.js';
+import type {
+  PsychMemConfig,
+  MemoryUnit,
+  HookInput,
+  StopData,
+  PostToolUseData,
+  SessionStartData,
+} from '../../types/index.js';
+import { DEFAULT_CONFIG, getScopeForClassification } from '../../types/index.js';
+import { PsychMem, createPsychMem } from '../../index.js';
+import { MemoryDatabase, createMemoryDatabase } from '../../storage/database.js';
+import { MemoryRetrieval } from '../../retrieval/index.js';
+
+// =============================================================================
+// Debug logging — writes to ~/.psychmem/plugin-debug.log
+// =============================================================================
+
+const _psychmemDir = join(homedir(), '.psychmem');
+const _logFile = join(_psychmemDir, 'plugin-debug.log');
+
+if (!existsSync(_psychmemDir)) {
+  try { mkdirSync(_psychmemDir, { recursive: true }); } catch (_) { /* ignore */ }
+}
+
+function debugLog(msg: string): void {
+  const ts = new Date().toISOString();
+  try {
+    appendFileSync(_logFile, `[${ts}] [adapter] ${msg}\n`);
+  } catch (_) { /* ignore */ }
+}
+
+// =============================================================================
+// Session ID extraction helpers
+// =============================================================================
+
+/**
+ * Extract a session ID from an event's properties object.
+ * 
+ * SDK shapes:
+ * - session.created  → properties.info.id
+ * - session.idle     → properties.sessionID
+ * - session.deleted  → properties.info.id
+ * - session.error    → properties.sessionID  (or properties.info?.id)
+ */
+function getSessionIdFromEvent(properties?: Record<string, unknown>): string | undefined {
+  if (!properties) return undefined;
+
+  // Try properties.info.id (session.created, session.deleted)
+  const info = properties.info as Record<string, unknown> | undefined;
+  if (info && typeof info.id === 'string') return info.id;
+
+  // Try properties.sessionID (session.idle, session.error)
+  if (typeof properties.sessionID === 'string') return properties.sessionID;
+
+  // Fallback: properties.id (shouldn't happen with current SDK, but safe)
+  if (typeof properties.id === 'string') return properties.id;
+
+  return undefined;
+}
+
+/**
+ * OpenCode adapter instance state
+ */
+interface OpenCodeAdapterState {
+  psychmem: PsychMem;
+  db: MemoryDatabase;
+  retrieval: MemoryRetrieval;
+  config: PsychMemConfig;
+  currentSessionId: string | null;
+  worktree: string;
+  client: OpenCodeClient;
+}
+
+/**
+ * Create OpenCode plugin hooks with PsychMem integration
+ */
+export async function createOpenCodePlugin(
+  ctx: OpenCodePluginContext,
+  configOverrides: Partial<PsychMemConfig> = {}
+): Promise<OpenCodePluginHooks> {
+  // Initialize with OpenCode-specific config
+  const config: PsychMemConfig = {
+    ...DEFAULT_CONFIG,
+    agentType: 'opencode',
+    ...configOverrides,
+  };
+  
+  // Initialize PsychMem components (async for Bun compatibility)
+  const db = await createMemoryDatabase(config);
+  const psychmem = await createPsychMem(config);
+  const retrieval = new MemoryRetrieval(db, config);
+  
+  // Resolve project root: ctx.worktree returns "/" on Windows, fall back to ctx.directory
+  const worktree = (!ctx.worktree || ctx.worktree === '/' || ctx.worktree === '\\')
+    ? ctx.directory
+    : ctx.worktree;
+  
+  // Adapter state
+  const state: OpenCodeAdapterState = {
+    psychmem,
+    db,
+    retrieval,
+    config,
+    currentSessionId: null,
+    worktree,
+    client: ctx.client,
+  };
+  
+  // Log initialization
+  debugLog(`PsychMem initialized — worktree=${ctx.worktree}, directory=${ctx.directory}, resolved project=${worktree}`);
+  log(ctx, 'info', `PsychMem initialized for project: ${worktree}`);
+  
+  return {
+    /**
+     * Handle session lifecycle events
+     */
+    event: async ({ event }) => {
+      // Skip extremely noisy streaming events entirely
+      const silentEvents = new Set([
+        'message.part.delta',
+        'message.part.updated',
+        'session.diff',
+      ]);
+      if (silentEvents.has(event.type)) return;
+      
+      // For handled events, log full details; for others, just log type
+      const handledEvents = new Set([
+        'session.created', 'session.idle', 'session.deleted', 'session.error', 'message.updated',
+      ]);
+      
+      if (handledEvents.has(event.type)) {
+        debugLog(`Event: ${event.type} — properties: ${JSON.stringify(event.properties, null, 2)}`);
+      } else {
+        debugLog(`Event (skipped): ${event.type}`);
+      }
+      
+      const sessionId = getSessionIdFromEvent(event.properties);
+      
+      switch (event.type) {
+        case 'session.created':
+          await handleSessionCreated(state, ctx, sessionId);
+          break;
+          
+        case 'session.idle':
+          await handleSessionIdle(state, ctx, sessionId);
+          break;
+          
+        case 'session.deleted':
+        case 'session.error':
+          await handleSessionEnd(state, ctx, event.type, sessionId);
+          break;
+        
+        // v1.9: Per-message memory extraction
+        case 'message.updated':
+          if (state.config.opencode.extractOnMessage) {
+            await handleMessageUpdated(state, ctx, event.properties as OpenCodeMessageUpdatedEvent);
+          }
+          break;
+      }
+    },
+    
+    /**
+     * Hook after tool execution - capture tool results
+     * 
+     * SDK shapes:
+     *   input:  { tool: string, sessionID: string, callID: string, args: any }
+     *   output: { title: string, output: string, metadata: any }
+     */
+    'tool.execute.after': async (input: OpenCodeToolInput, output: OpenCodeToolOutput) => {
+      debugLog(`tool.execute.after: tool=${input.tool}, sessionID=${input.sessionID}, callID=${input.callID}`);
+      
+      // Use input.sessionID as fallback if state doesn't have one yet
+      if (!state.currentSessionId && input.sessionID) {
+        debugLog(`Setting currentSessionId from tool input: ${input.sessionID}`);
+        state.currentSessionId = input.sessionID;
+      }
+      
+      if (!state.currentSessionId) {
+        debugLog(`tool.execute.after: no session ID available, skipping`);
+        return;
+      }
+      
+      await handlePostToolUse(state, ctx, input, output);
+    },
+    
+    /**
+      * Experimental: Extract and inject memories during session compaction
+      * 
+      * Compaction happens when the conversation context grows too large.
+      * This is a critical moment to:
+      * 1. EXTRACT: Sweep the conversation for important memories before they're compressed
+      * 2. INJECT: Control exactly what gets preserved via output.prompt
+      * 
+      * IMPORTANT: Setting output.prompt REPLACES the entire compaction prompt,
+      * giving us full control over what the LLM preserves during compaction.
+      */
+    'experimental.session.compacting': async (input: OpenCodeCompactionInput, output) => {
+      debugLog(`Compaction hook triggered — input: ${JSON.stringify(input)}`);
+      
+      const sessionId = input.sessionID ?? state.currentSessionId;
+      
+      // Phase 1: EXTRACT memories from conversation before compaction
+      if (state.config.opencode.extractOnCompaction && sessionId) {
+        try {
+          const extractionResult = await handleCompactionExtraction(state, ctx, sessionId);
+          if (extractionResult.memoriesCreated > 0) {
+            log(ctx, 'info', `Compaction sweep: extracted ${extractionResult.memoriesCreated} memories before compaction`);
+          }
+        } catch (error) {
+          debugLog(`Compaction extraction failed: ${error}`);
+          log(ctx, 'warn', `Compaction extraction failed: ${error}`);
+        }
+      }
+      
+      // Phase 2: INJECT memories into compaction context
+      // We use output.prompt to REPLACE the entire compaction prompt
+      // This gives us precise control over what gets preserved
+      if (state.config.opencode.injectOnCompaction) {
+        const memories = await getRelevantMemories(
+          state,
+          state.config.opencode.maxCompactionMemories
+        );
+        
+        if (memories.length > 0) {
+          const memoryContext = formatMemoriesForInjection(memories, 'compaction', state.worktree);
+          
+          // Build a custom compaction prompt that includes our memories
+          output.prompt = buildCompactionPrompt(memoryContext);
+          
+          log(ctx, 'info', `Injected ${memories.length} memories into compaction prompt`);
+          debugLog(`Compaction prompt set with ${memories.length} memories`);
+        } else {
+          // Even with no memories, we can still provide an optimized compaction prompt
+          output.prompt = buildCompactionPrompt(null);
+          debugLog(`Compaction prompt set (no memories to inject)`);
+        }
+      }
+    },
+  };
+}
+
+/**
+ * Handle session.created event
+ */
+async function handleSessionCreated(
+  state: OpenCodeAdapterState,
+  ctx: OpenCodePluginContext,
+  sessionId?: string
+): Promise<void> {
+  debugLog(`handleSessionCreated called with sessionId=${sessionId ?? 'NONE'}`);
+  
+  if (!sessionId) {
+    debugLog('handleSessionCreated: no sessionId — BAILING');
+    return;
+  }
+  
+  state.currentSessionId = sessionId;
+  debugLog(`state.currentSessionId set to: ${sessionId}`);
+  
+  // Create session in PsychMem
+  const hookInput: HookInput = {
+    hookType: 'SessionStart',
+    sessionId,
+    timestamp: new Date().toISOString(),
+    data: {
+      project: state.worktree,
+      workingDirectory: ctx.directory,
+      metadata: { agentType: 'opencode' },
+    } as SessionStartData,
+  };
+  
+  await state.psychmem.handleHook(hookInput);
+  
+  // Inject relevant memories on session start
+  const memories = await getRelevantMemories(
+    state,
+    state.config.opencode.maxSessionStartMemories
+  );
+  
+  if (memories.length > 0) {
+    const memoryContext = formatMemoriesForInjection(memories, 'session_start', state.worktree);
+    await injectContext(state, sessionId, memoryContext);
+    log(ctx, 'info', `Injected ${memories.length} memories on session start`);
+  }
+  
+  log(ctx, 'info', `Session started: ${sessionId}`);
+}
+
+/**
+ * Handle session.idle event - extract memories from new messages
+ */
+async function handleSessionIdle(
+  state: OpenCodeAdapterState,
+  ctx: OpenCodePluginContext,
+  sessionId?: string
+): Promise<void> {
+  const effectiveSessionId = sessionId ?? state.currentSessionId;
+  debugLog(`handleSessionIdle called — sessionId=${sessionId ?? 'NONE'}, state.currentSessionId=${state.currentSessionId ?? 'NONE'}, effective=${effectiveSessionId ?? 'NONE'}`);
+  
+  if (!effectiveSessionId) {
+    debugLog('handleSessionIdle: no effective sessionId — BAILING');
+    return;
+  }
+  
+  // Update state if we got a session ID from the event
+  if (sessionId && !state.currentSessionId) {
+    state.currentSessionId = sessionId;
+    debugLog(`state.currentSessionId set from idle event: ${sessionId}`);
+  }
+  
+  // Get current watermark
+  const watermark = state.db.getMessageWatermark(effectiveSessionId);
+  debugLog(`Watermark for session ${effectiveSessionId}: ${watermark}`);
+  
+  // Fetch messages from OpenCode
+  let messages: OpenCodeMessageContainer[];
+  try {
+    const response = await state.client.session.messages({
+      path: { id: effectiveSessionId },
+    });
+    messages = response.data;
+    debugLog(`Fetched ${messages?.length ?? 0} messages for session ${effectiveSessionId}`);
+  } catch (error) {
+    debugLog(`Failed to fetch messages: ${error}`);
+    return;
+  }
+  
+  if (!messages || messages.length <= watermark) {
+    debugLog(`No new messages (total=${messages?.length ?? 0}, watermark=${watermark})`);
+    return; // No new messages to process
+  }
+  
+  // Extract text from new messages
+  const newMessages = messages.slice(watermark);
+  const conversationText = extractConversationText(newMessages);
+  
+  if (!conversationText.trim()) {
+    state.db.updateMessageWatermark(effectiveSessionId, messages.length);
+    debugLog('No text content in new messages, updated watermark only');
+    return;
+  }
+  
+  debugLog(`Extracted ${conversationText.length} chars of conversation text from ${newMessages.length} new messages`);
+  
+  // Process through Stop hook (extracts memories)
+  const hookInput: HookInput = {
+    hookType: 'Stop',
+    sessionId: effectiveSessionId,
+    timestamp: new Date().toISOString(),
+    data: {
+      reason: 'user', // session.idle typically means user turn
+      conversationText,
+      metadata: {
+        messageRange: { from: watermark, to: messages.length },
+        agentType: 'opencode',
+      },
+    } as StopData,
+  };
+  
+  const result = await state.psychmem.handleHook(hookInput);
+  
+  // Update watermark
+  state.db.updateMessageWatermark(effectiveSessionId, messages.length);
+  
+  if (result.success) {
+    debugLog(`Stop hook succeeded — processed ${newMessages.length} messages, watermark now: ${messages.length}`);
+    log(ctx, 'debug', `Processed ${newMessages.length} messages, watermark: ${messages.length}`);
+  } else {
+    debugLog(`Stop hook returned success=false`);
+  }
+}
+
+/**
+ * Handle session end events
+ */
+async function handleSessionEnd(
+  state: OpenCodeAdapterState,
+  ctx: OpenCodePluginContext,
+  eventType: string,
+  sessionId?: string
+): Promise<void> {
+  const effectiveSessionId = sessionId ?? state.currentSessionId;
+  debugLog(`handleSessionEnd: eventType=${eventType}, sessionId=${sessionId ?? 'NONE'}, effective=${effectiveSessionId ?? 'NONE'}`);
+  
+  if (!effectiveSessionId) {
+    debugLog('handleSessionEnd: no effective sessionId — BAILING');
+    return;
+  }
+  
+  const reason = eventType === 'session.error' ? 'abandoned' : 'normal';
+  
+  const hookInput: HookInput = {
+    hookType: 'SessionEnd',
+    sessionId: effectiveSessionId,
+    timestamp: new Date().toISOString(),
+    data: {
+      reason,
+      metadata: { agentType: 'opencode', eventType },
+    },
+  };
+  
+  await state.psychmem.handleHook(hookInput);
+  
+  state.currentSessionId = null;
+  debugLog(`Session ended: ${effectiveSessionId} (${reason})`);
+  log(ctx, 'info', `Session ended: ${effectiveSessionId} (${reason})`);
+}
+
+/**
+ * Handle message.updated event - v1.9 per-message memory extraction
+ * 
+ * This enables real-time memory extraction as conversations happen,
+ * rather than waiting until session end (session.idle).
+ * 
+ * Psychology basis: Human memory encodes continuously, not just at conversation end.
+ * Benefits:
+ * - Important info captured even if session crashes
+ * - Working memory (STM) updated in real-time
+ * - Better context as conversation progresses
+ */
+async function handleMessageUpdated(
+  state: OpenCodeAdapterState,
+  ctx: OpenCodePluginContext,
+  eventProps: OpenCodeMessageUpdatedEvent
+): Promise<void> {
+  const sessionId = eventProps.sessionID ?? state.currentSessionId;
+  debugLog(`handleMessageUpdated: sessionId=${sessionId ?? 'NONE'}, messageID=${eventProps.messageID ?? 'NONE'}, role=${eventProps.role ?? 'NONE'}`);
+  
+  if (!sessionId) {
+    debugLog('handleMessageUpdated: no sessionId — BAILING');
+    return;
+  }
+  
+  // Update state if needed
+  if (!state.currentSessionId && sessionId) {
+    state.currentSessionId = sessionId;
+  }
+  
+  // Fetch recent messages for context (sliding window)
+  const windowSize = state.config.opencode.messageWindowSize;
+  let messages: OpenCodeMessageContainer[];
+  try {
+    const response = await state.client.session.messages({
+      path: { id: sessionId },
+    });
+    messages = response.data;
+    debugLog(`handleMessageUpdated: fetched ${messages?.length ?? 0} messages`);
+  } catch (error) {
+    debugLog(`handleMessageUpdated: failed to fetch messages: ${error}`);
+    return;
+  }
+  
+  if (!messages || messages.length === 0) {
+    debugLog('handleMessageUpdated: no messages');
+    return;
+  }
+  
+  // Get the most recent messages within the window
+  const recentMessages = messages.slice(-windowSize);
+  
+  // Extract text from recent messages only
+  const conversationText = extractConversationText(recentMessages);
+  
+  if (!conversationText.trim()) {
+    debugLog('handleMessageUpdated: no text content in recent messages');
+    return;
+  }
+  
+  debugLog(`handleMessageUpdated: extracted ${conversationText.length} chars from ${recentMessages.length} recent messages`);
+  
+  // Quick importance pre-filter: check if there are any high-importance signals
+  // before running the full extraction pipeline
+  const hasImportantContent = preFilterImportance(
+    conversationText,
+    state.config.opencode.messageImportanceThreshold
+  );
+  
+  if (!hasImportantContent) {
+    debugLog('handleMessageUpdated: no high-importance signals detected, skipping extraction');
+    return;
+  }
+  
+  // Process through Stop hook (extracts memories)
+  const hookInput: HookInput = {
+    hookType: 'Stop',
+    sessionId,
+    timestamp: new Date().toISOString(),
+    data: {
+      reason: 'user',
+      conversationText,
+      metadata: {
+        agentType: 'opencode',
+        isPerMessageExtraction: true,
+        windowSize,
+        messageCount: recentMessages.length,
+      },
+    } as StopData,
+  };
+  
+  const result = await state.psychmem.handleHook(hookInput);
+  
+  if (result.success && result.memoriesCreated && result.memoriesCreated > 0) {
+    debugLog(`handleMessageUpdated: created ${result.memoriesCreated} memories from per-message extraction`);
+    log(ctx, 'debug', `Per-message extraction: ${result.memoriesCreated} memories from ${recentMessages.length} messages`);
+  } else {
+    debugLog('handleMessageUpdated: no memories created');
+  }
+}
+
+/**
+ * Pre-filter importance check for per-message extraction
+ * 
+ * This is a lightweight check to avoid running the full extraction pipeline
+ * on every message. We look for quick indicators of important content:
+ * - Explicit remember requests
+ * - Emphasis markers (caps, exclamation)
+ * - Key signal words (never, always, important, bug, error, fixed)
+ * - Corrections or negations
+ */
+function preFilterImportance(text: string, threshold: number): boolean {
+  const lowerText = text.toLowerCase();
+  
+  // High-importance patterns that warrant full extraction
+  const highImportancePatterns = [
+    // Explicit memory requests
+    /remember|don't forget|keep in mind|note that|important/i,
+    // Constraint/preference indicators
+    /never|always|must|cannot|don't|won't|shouldn't|can't/i,
+    // Bug/error indicators
+    /bug|error|fix|fixed|issue|problem|broken|fail/i,
+    // Decision indicators
+    /decided|decision|chose|choice|prefer|better to|should use/i,
+    // Learning indicators
+    /learned|realized|discovered|found out|turns out|actually/i,
+    // Correction indicators
+    /no,|not|wrong|incorrect|actually|instead|rather/i,
+    // Emphasis
+    /!{2,}|[A-Z]{4,}/,
+  ];
+  
+  let matchCount = 0;
+  for (const pattern of highImportancePatterns) {
+    if (pattern.test(text)) {
+      matchCount++;
+    }
+  }
+  
+  // Normalize to 0-1 score: at least 2 patterns for threshold 0.5
+  const score = Math.min(1, matchCount / 4);
+  
+  debugLog(`preFilterImportance: matchCount=${matchCount}, score=${score.toFixed(2)}, threshold=${threshold}`);
+  
+  return score >= threshold;
+}
+
+/**
+ * Handle post-tool-use event
+ * 
+ * SDK input:  { tool: string, sessionID: string, callID: string, args: any }
+ * SDK output: { title: string, output: string, metadata: any }
+ */
+async function handlePostToolUse(
+  state: OpenCodeAdapterState,
+  ctx: OpenCodePluginContext,
+  input: OpenCodeToolInput,
+  output: OpenCodeToolOutput
+): Promise<void> {
+  const sessionId = state.currentSessionId;
+  if (!sessionId) return;
+  
+  debugLog(`handlePostToolUse: tool=${input.tool}, output.title=${output.title}, output.output length=${output.output?.length ?? 0}`);
+  
+  // Truncate long output for storage
+  const toolOutput = output.output && output.output.length > 500
+    ? output.output.slice(0, 500) + '...[truncated]'
+    : (output.output ?? '');
+  
+  const hookInput: HookInput = {
+    hookType: 'PostToolUse',
+    sessionId,
+    timestamp: new Date().toISOString(),
+    data: {
+      toolName: input.tool,
+      toolInput: JSON.stringify(input.args),
+      toolOutput,
+      success: true, // SDK doesn't separate error in output; errors come through session.error events
+      metadata: { agentType: 'opencode', callID: input.callID, title: output.title },
+    } as PostToolUseData,
+  };
+  
+  await state.psychmem.handleHook(hookInput);
+  debugLog(`PostToolUse hook completed for tool: ${input.tool}`);
+}
+
+/**
+ * Extract conversation text from OpenCode messages
+ */
+function extractConversationText(messages: OpenCodeMessageContainer[]): string {
+  const lines: string[] = [];
+  
+  for (const msg of messages) {
+    const role = msg.info.role === 'user' ? 'Human' : 'Assistant';
+    
+    for (const part of msg.parts) {
+      if (part.type === 'text' && part.text) {
+        lines.push(`${role}: ${part.text}`);
+      } else if (part.type === 'tool-invocation' && part.tool) {
+        lines.push(`Assistant: [Tool: ${part.tool}]`);
+        if (part.args) {
+          lines.push(`Input: ${JSON.stringify(part.args)}`);
+        }
+      } else if (part.type === 'tool-result') {
+        if (part.error) {
+          lines.push(`Tool Error: ${part.error}`);
+        } else if (part.result) {
+          const resultStr = typeof part.result === 'string' 
+            ? part.result 
+            : JSON.stringify(part.result);
+          // Truncate long tool results
+          const truncated = resultStr.length > 500 
+            ? resultStr.slice(0, 500) + '...[truncated]'
+            : resultStr;
+          lines.push(`Tool Result: ${truncated}`);
+        }
+      }
+    }
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Get relevant memories for current context with scope-based filtering (v1.6)
+ * Returns:
+ * - All user-level memories (constraint, preference, learning, procedural)
+ * - Project-level memories only for the current project
+ */
+async function getRelevantMemories(
+  state: OpenCodeAdapterState,
+  limit: number
+): Promise<MemoryUnit[]> {
+  // Use scope-based retrieval with current project context
+  return state.retrieval.retrieveByScope({
+    currentProject: state.worktree,
+    limit,
+  });
+}
+
+/**
+ * Format memories for context injection with scope grouping (v1.6)
+ */
+function formatMemoriesForInjection(
+  memories: MemoryUnit[],
+  context: 'session_start' | 'compaction',
+  currentProject?: string
+): string {
+  const header = context === 'session_start'
+    ? '## Relevant Memories from Previous Sessions'
+    : '## Preserved Memories (from PsychMem)';
+  
+  const lines: string[] = [header, ''];
+  
+  // Separate user-level and project-level memories
+  const userLevelClassifications = ['constraint', 'preference', 'learning', 'procedural'];
+  const userLevel = memories.filter(m => userLevelClassifications.includes(m.classification));
+  const projectLevel = memories.filter(m => !userLevelClassifications.includes(m.classification));
+  
+  // User-level memories (always applicable)
+  if (userLevel.length > 0) {
+    lines.push('### User Preferences & Constraints');
+    lines.push('_These apply across all projects_');
+    lines.push('');
+    
+    // Group by classification
+    const byClass = new Map<string, MemoryUnit[]>();
+    for (const mem of userLevel) {
+      const existing = byClass.get(mem.classification) ?? [];
+      existing.push(mem);
+      byClass.set(mem.classification, existing);
+    }
+    
+    for (const [classification, mems] of byClass) {
+      for (const mem of mems) {
+        const storeLabel = mem.store === 'ltm' ? '[LTM]' : '[STM]';
+        lines.push(`- ${storeLabel} [${classification}] ${mem.summary}`);
+      }
+    }
+    lines.push('');
+  }
+  
+  // Project-level memories (specific to current project)
+  if (projectLevel.length > 0) {
+    const projectName = currentProject ? currentProject.split(/[/\\]/).pop() : 'Current Project';
+    lines.push(`### ${projectName} Context`);
+    lines.push('_These are specific to this project_');
+    lines.push('');
+    
+    // Group by classification
+    const byClass = new Map<string, MemoryUnit[]>();
+    for (const mem of projectLevel) {
+      const existing = byClass.get(mem.classification) ?? [];
+      existing.push(mem);
+      byClass.set(mem.classification, existing);
+    }
+    
+    for (const [classification, mems] of byClass) {
+      for (const mem of mems) {
+        const storeLabel = mem.store === 'ltm' ? '[LTM]' : '[STM]';
+        lines.push(`- ${storeLabel} [${classification}] ${mem.summary}`);
+      }
+    }
+    lines.push('');
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Inject context into OpenCode session without triggering a response
+ */
+async function injectContext(
+  state: OpenCodeAdapterState,
+  sessionId: string,
+  context: string
+): Promise<void> {
+  try {
+    await state.client.session.prompt({
+      path: { id: sessionId },
+      body: {
+        noReply: true,
+        parts: [{ type: 'text', text: context }],
+      },
+    });
+  } catch (error) {
+    // Context injection is best-effort
+    console.error('Failed to inject context:', error);
+  }
+}
+
+/**
+ * Handle compaction extraction - sweep ALL messages for memories before compaction
+ * 
+ * Unlike handleSessionIdle (incremental), this processes the ENTIRE conversation
+ * because compaction will compress/summarize old messages and we'll lose the original content.
+ */
+async function handleCompactionExtraction(
+  state: OpenCodeAdapterState,
+  ctx: OpenCodePluginContext,
+  sessionId: string
+): Promise<{ memoriesCreated: number }> {
+  debugLog(`handleCompactionExtraction: starting full sweep for session ${sessionId}`);
+  
+  // Fetch ALL messages for the session
+  let messages: OpenCodeMessageContainer[];
+  try {
+    const response = await state.client.session.messages({
+      path: { id: sessionId },
+    });
+    messages = response.data;
+    debugLog(`Compaction sweep: fetched ${messages?.length ?? 0} total messages`);
+  } catch (error) {
+    debugLog(`Compaction sweep: failed to fetch messages: ${error}`);
+    return { memoriesCreated: 0 };
+  }
+  
+  if (!messages || messages.length === 0) {
+    debugLog('Compaction sweep: no messages to process');
+    return { memoriesCreated: 0 };
+  }
+  
+  // Extract text from ALL messages (not incremental)
+  const conversationText = extractConversationText(messages);
+  
+  if (!conversationText.trim()) {
+    debugLog('Compaction sweep: no text content in messages');
+    return { memoriesCreated: 0 };
+  }
+  
+  debugLog(`Compaction sweep: extracted ${conversationText.length} chars from ${messages.length} messages`);
+  
+  // Process through Stop hook (extracts memories)
+  // Note: We use 'compaction' reason to distinguish from normal 'user' turns
+  const hookInput: HookInput = {
+    hookType: 'Stop',
+    sessionId,
+    timestamp: new Date().toISOString(),
+    data: {
+      reason: 'compaction',
+      conversationText,
+      metadata: {
+        messageCount: messages.length,
+        agentType: 'opencode',
+        isCompactionSweep: true,
+      },
+    } as StopData,
+  };
+  
+  const result = await state.psychmem.handleHook(hookInput);
+  
+  // Note: We do NOT update the watermark here because:
+  // 1. After compaction, the message indices will change
+  // 2. We want the next session.idle to start fresh with the compacted context
+  
+  if (result.success) {
+    const memoriesCreated = result.memoriesCreated ?? 0;
+    debugLog(`Compaction sweep: created ${memoriesCreated} memories`);
+    return { memoriesCreated };
+  }
+  
+  debugLog('Compaction sweep: hook returned success=false');
+  return { memoriesCreated: 0 };
+}
+
+/**
+ * Build a custom compaction prompt that preserves PsychMem memories
+ * 
+ * This prompt REPLACES the default OpenCode compaction prompt,
+ * giving us full control over what the LLM preserves.
+ * 
+ * Design principles:
+ * 1. Preserve user-level memories (constraints, preferences) - HIGHEST priority
+ * 2. Preserve project-level context (decisions, bugfixes)
+ * 3. Keep critical conversation context (current task, recent actions)
+ * 4. Discard verbose tool outputs, intermediate reasoning
+ */
+function buildCompactionPrompt(memoriesMarkdown: string | null): string {
+  const sections: string[] = [];
+  
+  // Section 1: PsychMem memories (if any)
+  if (memoriesMarkdown) {
+    sections.push(memoriesMarkdown);
+  }
+  
+  // Section 2: Instructions for the compaction LLM
+  sections.push(`## Compaction Instructions
+
+You are compacting a conversation that has grown too long. Your goal is to create a condensed summary that preserves all information needed to continue the task effectively.
+
+### MUST PRESERVE (highest priority)
+- The current task/goal the user is working on
+- Any user constraints, preferences, or requirements stated
+- Decisions made and their rationale
+- Errors encountered and their solutions
+- Files modified and why
+- Current state of any in-progress work
+
+### SHOULD PRESERVE (medium priority)  
+- Key tool results that inform the current task
+- Important paths, names, or identifiers mentioned
+- Context about the codebase structure if relevant
+
+### CAN DISCARD (safe to remove)
+- Verbose tool outputs (file contents, search results) - summarize instead
+- Intermediate reasoning that led to final decisions
+- Exploratory discussions that didn't lead anywhere
+- Repetitive information already captured above
+
+### OUTPUT FORMAT
+Write a clear, structured summary in markdown that a new instance of yourself could read and immediately understand:
+1. What task is being worked on
+2. What has been accomplished
+3. What remains to be done
+4. Any critical context (constraints, decisions, errors)
+
+Do NOT include this instruction block in your output.`);
+
+  return sections.join('\n\n');
+}
+
+/**
+ * Log message through OpenCode's logging API
+ */
+function log(
+  ctx: OpenCodePluginContext,
+  level: 'debug' | 'info' | 'warn' | 'error',
+  message: string,
+  extra?: unknown
+): void {
+  ctx.client.app.log({
+    body: {
+      service: 'psychmem',
+      level,
+      message,
+      extra,
+    },
+  }).catch(() => {
+    // Logging is best-effort
+  });
+}
+
+/**
+ * OpenCode adapter class implementing PsychMemAdapter interface
+ */
+export class OpenCodeAdapter implements PsychMemAdapter {
+  readonly agentType = 'opencode' as const;
+  
+  private state: OpenCodeAdapterState | null = null;
+  private ctx: OpenCodePluginContext | null = null;
+  
+  async initialize(): Promise<void> {
+    // Initialization happens in createOpenCodePlugin
+    // This method is for interface compliance
+  }
+  
+  /**
+   * Set up adapter with OpenCode context
+   */
+  setup(ctx: OpenCodePluginContext, state: OpenCodeAdapterState): void {
+    this.ctx = ctx;
+    this.state = state;
+  }
+  
+  async injectMemories(sessionId: string, memories: MemoryUnit[]): Promise<void> {
+    if (!this.state) {
+      throw new Error('OpenCode adapter not initialized');
+    }
+    
+    const context = formatMemoriesForInjection(memories, 'session_start', this.state.worktree);
+    await injectContext(this.state, sessionId, context);
+  }
+  
+  getCurrentSessionId(): string | null {
+    return this.state?.currentSessionId ?? null;
+  }
+  
+  async cleanup(): Promise<void> {
+    if (this.state) {
+      this.state.psychmem.close();
+      this.state = null;
+    }
+    this.ctx = null;
+  }
+}
+
+/**
+ * Default export for plugin loading
+ */
+export default createOpenCodePlugin;
