@@ -91,20 +91,48 @@ export class PsychMem {
    */
   getStats() {
     this.ensureInit();
-    const stmMemories = this.db.getMemoriesByStore('stm');
-    const ltmMemories = this.db.getMemoriesByStore('ltm');
-    
+    const stmActive = this.db.getMemoriesByStore('stm', 'active');
+    const ltmActive = this.db.getMemoriesByStore('ltm', 'active');
+    const stmDecayed = this.db.getMemoriesByStore('stm', 'decayed');
+    const ltmDecayed = this.db.getMemoriesByStore('ltm', 'decayed');
+    const stmPinned = this.db.getMemoriesByStore('stm', 'pinned');
+    const ltmPinned = this.db.getMemoriesByStore('ltm', 'pinned');
+
     return {
       stm: {
-        count: stmMemories.length,
-        avgStrength: this.avgStrength(stmMemories),
+        count: stmActive.length,
+        decayedCount: stmDecayed.length,
+        pinnedCount: stmPinned.length,
+        avgStrength: this.avgStrength(stmActive),
       },
       ltm: {
-        count: ltmMemories.length,
-        avgStrength: this.avgStrength(ltmMemories),
+        count: ltmActive.length,
+        decayedCount: ltmDecayed.length,
+        pinnedCount: ltmPinned.length,
+        avgStrength: this.avgStrength(ltmActive),
       },
-      total: stmMemories.length + ltmMemories.length,
+      total: stmActive.length + ltmActive.length,
+      totalIncludingDecayed:
+        stmActive.length + ltmActive.length +
+        stmDecayed.length + ltmDecayed.length +
+        stmPinned.length + ltmPinned.length,
     };
+  }
+
+  /**
+   * List memories, optionally filtered by store and/or status
+   */
+  listMemories(options: { store?: 'stm' | 'ltm'; status?: 'active' | 'decayed' | 'pinned' | 'forgotten'; limit?: number } = {}) {
+    this.ensureInit();
+    const { store, status = 'active', limit = 50 } = options;
+    if (store) {
+      return this.db.getMemoriesByStore(store, status as any).slice(0, limit);
+    }
+    const stm = this.db.getMemoriesByStore('stm', status as any);
+    const ltm = this.db.getMemoriesByStore('ltm', status as any);
+    return [...ltm, ...stm]
+      .sort((a, b) => b.strength - a.strength)
+      .slice(0, limit);
   }
 
   /**

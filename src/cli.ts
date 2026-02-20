@@ -21,11 +21,30 @@ import { PsychMem, createPsychMem } from './index.js';
 import type { HookInput } from './types/index.js';
 import { TranscriptParser } from './transcript/parser.js';
 
-const args = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
+
+// Parse --agent <type> flag (default: opencode)
+let agentType: 'opencode' | 'claude-code' = 'opencode';
+const filteredArgs: string[] = [];
+for (let i = 0; i < rawArgs.length; i++) {
+  if (rawArgs[i] === '--agent' && rawArgs[i + 1]) {
+    const val = rawArgs[++i];
+    if (val === 'opencode' || val === 'claude-code') {
+      agentType = val;
+    } else {
+      console.error(`Unknown agent type: ${val}. Use 'opencode' or 'claude-code'.`);
+      process.exit(1);
+    }
+  } else {
+    filteredArgs.push(rawArgs[i]!);
+  }
+}
+
+const args = filteredArgs;
 const command = args[0];
 
 async function main() {
-  const psychmem = await createPsychMem();
+  const psychmem = await createPsychMem({ agentType });
   
   try {
     switch (command) {
@@ -35,6 +54,10 @@ async function main() {
       
       case 'search':
         handleSearch(psychmem, args.slice(1));
+        break;
+      
+      case 'list':
+        handleList(psychmem, args.slice(1));
         break;
       
       case 'get': {
@@ -302,6 +325,41 @@ function handleSearch(psychmem: PsychMem, args: string[]) {
   }
 }
 
+function handleList(psychmem: PsychMem, args: string[]) {
+  // Parse optional flags: --store stm|ltm  --status active|decayed|pinned  --limit N
+  let store: 'stm' | 'ltm' | undefined;
+  let status: 'active' | 'decayed' | 'pinned' | 'forgotten' = 'active';
+  let limit = 50;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--store' && args[i + 1]) {
+      const v = args[++i]!;
+      if (v === 'stm' || v === 'ltm') store = v;
+    } else if (args[i] === '--status' && args[i + 1]) {
+      const v = args[++i] as any;
+      if (['active', 'decayed', 'pinned', 'forgotten'].includes(v)) status = v;
+    } else if (args[i] === '--limit' && args[i + 1]) {
+      limit = parseInt(args[++i]!, 10) || 50;
+    }
+  }
+
+  const memories = psychmem.listMemories(store !== undefined ? { store, status, limit } : { status, limit });
+
+  if (memories.length === 0) {
+    console.log(`No ${status} memories found.`);
+    return;
+  }
+
+  console.log(`${memories.length} ${status.toUpperCase()} memories (sorted by strength):\n`);
+  for (const mem of memories) {
+    const bar = formatStrengthBar(mem.strength);
+    const storeLabel = mem.store === 'ltm' ? 'LTM' : 'STM';
+    const date = mem.createdAt.toISOString().slice(0, 10);
+    console.log(`${bar} [${storeLabel}] [${mem.classification}] ${mem.summary}`);
+    console.log(`    ID: ${mem.id.slice(0, 8)} | strength: ${(mem.strength * 100).toFixed(1)}% | created: ${date}\n`);
+  }
+}
+
 function handleGet(psychmem: PsychMem, id: string) {
   const memory = psychmem.getMemory(id);
   
@@ -334,13 +392,18 @@ function handleStats(psychmem: PsychMem) {
   const stats = psychmem.getStats();
   
   console.log('PsychMem Statistics:\n');
-  console.log(`Total Memories: ${stats.total}`);
+  console.log(`Active Memories: ${stats.total}`);
+  console.log(`Total (incl. decayed): ${stats.totalIncludingDecayed}`);
   console.log(`\nShort-Term Memory (STM):`);
-  console.log(`  Count: ${stats.stm.count}`);
-  console.log(`  Avg Strength: ${(stats.stm.avgStrength * 100).toFixed(1)}%`);
+  console.log(`  Active: ${stats.stm.count}`);
+  console.log(`  Decayed: ${stats.stm.decayedCount}`);
+  console.log(`  Pinned: ${stats.stm.pinnedCount}`);
+  console.log(`  Avg Strength (active): ${(stats.stm.avgStrength * 100).toFixed(1)}%`);
   console.log(`\nLong-Term Memory (LTM):`);
-  console.log(`  Count: ${stats.ltm.count}`);
-  console.log(`  Avg Strength: ${(stats.ltm.avgStrength * 100).toFixed(1)}%`);
+  console.log(`  Active: ${stats.ltm.count}`);
+  console.log(`  Decayed: ${stats.ltm.decayedCount}`);
+  console.log(`  Pinned: ${stats.ltm.pinnedCount}`);
+  console.log(`  Avg Strength (active): ${(stats.ltm.avgStrength * 100).toFixed(1)}%`);
 }
 
 function handleDecay(psychmem: PsychMem) {
@@ -398,10 +461,18 @@ function printHelp() {
 PsychMem - Psych-grounded selective memory system for AI agents
 
 USAGE:
-  psychmem <command> [arguments]
+  psychmem [--agent opencode|claude-code] <command> [arguments]
+
+FLAGS:
+  --agent <type>     Agent type to use (default: opencode)
+                     Options: opencode, claude-code
 
 COMMANDS:
   hook <json>        Process a hook event (JSON as argument or stdin)
+  list               List memories (default: active, sorted by strength)
+                       --store stm|ltm    Filter by store
+                       --status active|decayed|pinned|forgotten
+                       --limit N          Max results (default: 50)
   search <query>     Search memories by text query
   get <id>           Get full memory details by ID
   stats              Show memory statistics
@@ -413,19 +484,25 @@ COMMANDS:
   help               Show this help message
 
 EXAMPLES:
-  # Process a hook event
-  echo '{"hookType":"SessionStart","sessionId":"123","timestamp":"2024-01-01","data":{"project":"myapp","workingDirectory":"."}}' | psychmem hook
+  # List active memories
+  psychmem list
+
+  # List all memories including decayed
+  psychmem list --status decayed
 
   # Search for memories about errors
   psychmem search "error handling"
 
   # Get memory details
-  psychmem get a1b2c3d4-e5f6-7890-abcd-ef1234567890
+  psychmem get a1b2c3d4
 
   # View stats
   psychmem stats
 
-For more information, see: https://github.com/example/psychmem
+  # Use with Claude Code agent
+  psychmem --agent claude-code stats
+
+For more information, see: https://github.com/muratg98/psychmem
 `);
 }
 
