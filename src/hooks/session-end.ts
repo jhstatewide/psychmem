@@ -39,19 +39,30 @@ export class SessionEndHook {
   process(sessionId: string, data: SessionEndData): SessionEndResult {
     // Determine session end status
     const sessionStatus = data.reason === 'abandoned' ? 'abandoned' : 'completed';
-    
-    // End the session
-    this.db.endSession(sessionId, sessionStatus);
-    
-    // Apply decay to all memories
-    const decayResult = this.selectiveMemory.applyDecay();
-    
-    // Run consolidation (STM → LTM)
-    const consolidationResult = this.selectiveMemory.runConsolidation();
-    
+
+    // Wrap decay + consolidation in a single atomic transaction
+    this.db.beginTransaction();
+    let decayResult: { memoriesDecayed: number };
+    let consolidationResult: { promoted: string[] };
+    try {
+      // End the session
+      this.db.endSession(sessionId, sessionStatus);
+
+      // Apply decay to all memories
+      decayResult = this.selectiveMemory.applyDecay();
+
+      // Run consolidation (STM → LTM)
+      consolidationResult = this.selectiveMemory.runConsolidation();
+
+      this.db.commitTransaction();
+    } catch (err) {
+      this.db.rollbackTransaction();
+      throw err;
+    }
+
     // Clean up old decayed memories (optional, based on config)
     const cleaned = this.cleanupDecayedMemories();
-    
+
     return {
       promoted: consolidationResult.promoted.length,
       decayed: decayResult.memoriesDecayed,

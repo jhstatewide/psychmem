@@ -7,7 +7,8 @@
  * - Formats and injects memories into OpenCode context
  */
 
-import { appendFileSync, mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, statSync, renameSync } from 'fs';
+import { appendFile } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
 import type {
@@ -36,11 +37,13 @@ import { MemoryDatabase, createMemoryDatabase } from '../../storage/database.js'
 import { MemoryRetrieval } from '../../retrieval/index.js';
 
 // =============================================================================
-// Debug logging — writes to ~/.psychmem/plugin-debug.log
+// Debug logging — writes to ~/.psychmem/plugin-debug.log (max 10 MB, rotated once)
 // =============================================================================
 
 const _psychmemDir = join(homedir(), '.psychmem');
 const _logFile = join(_psychmemDir, 'plugin-debug.log');
+const _logFileOld = join(_psychmemDir, 'plugin-debug.log.1');
+const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 
 if (!existsSync(_psychmemDir)) {
   try { mkdirSync(_psychmemDir, { recursive: true }); } catch (_) { /* ignore */ }
@@ -48,9 +51,19 @@ if (!existsSync(_psychmemDir)) {
 
 function debugLog(msg: string): void {
   const ts = new Date().toISOString();
-  try {
-    appendFileSync(_logFile, `[${ts}] [adapter] ${msg}\n`);
-  } catch (_) { /* ignore */ }
+  const line = `[${ts}] [adapter] ${msg}\n`;
+  // Fire-and-forget: rotate then append asynchronously (no blocking)
+  (async () => {
+    try {
+      // Rotate if log exceeds 10 MB
+      try {
+        if (statSync(_logFile).size >= LOG_MAX_BYTES) {
+          renameSync(_logFile, _logFileOld);
+        }
+      } catch (_) { /* file may not exist yet */ }
+      await appendFile(_logFile, line);
+    } catch (_) { /* ignore logging errors */ }
+  })();
 }
 
 // =============================================================================
@@ -110,8 +123,9 @@ export async function createOpenCodePlugin(
   };
   
   // Initialize PsychMem components (async for Bun compatibility)
+  // Create a single DB connection shared by psychmem and the adapter state
   const db = await createMemoryDatabase(config);
-  const psychmem = await createPsychMem(config);
+  const psychmem = await createPsychMem(config, db);
   const retrieval = new MemoryRetrieval(db, config);
   
   // Resolve project root: ctx.worktree returns "/" on Windows, fall back to ctx.directory
@@ -595,8 +609,8 @@ async function handlePostToolUse(
   debugLog(`handlePostToolUse: tool=${input.tool}, output.title=${output.title}, output.output length=${output.output?.length ?? 0}`);
   
   // Truncate long output for storage
-  const toolOutput = output.output && output.output.length > 500
-    ? output.output.slice(0, 500) + '...[truncated]'
+  const toolOutput = output.output && output.output.length > 2000
+    ? output.output.slice(0, 2000) + '...[truncated]'
     : (output.output ?? '');
   
   const hookInput: HookInput = {
@@ -641,8 +655,8 @@ function extractConversationText(messages: OpenCodeMessageContainer[]): string {
             ? part.result 
             : JSON.stringify(part.result);
           // Truncate long tool results
-          const truncated = resultStr.length > 500 
-            ? resultStr.slice(0, 500) + '...[truncated]'
+          const truncated = resultStr.length > 2000 
+            ? resultStr.slice(0, 2000) + '...[truncated]'
             : resultStr;
           lines.push(`Tool Result: ${truncated}`);
         }

@@ -53,11 +53,16 @@
     "claude-code",
     "opencode"
   ],
-  "author": "",
+  "author": "muratg98",
   "license": "MIT",
+  "files": [
+    "dist",
+    "hooks",
+    "plugin.json",
+    "README.md"
+  ],
   "dependencies": {
     "better-sqlite3": "^12.6.2",
-    "sqlite-vec": "^0.1.7-alpha.2",
     "uuid": "^13.0.0"
   },
   "devDependencies": {

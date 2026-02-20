@@ -47,19 +47,22 @@ const TOPIC_FILES: Record<string, MemoryClassification[]> = {
 // =============================================================================
 
 /**
- * Convert a project path to a Claude Code-compatible project ID
- * Claude Code normalizes paths: /Users/foo/bar → Users-foo-bar
+ * Convert a project path to a Claude Code-compatible project ID.
+ *
+ * Claude Code uses the full absolute path with every non-alphanumeric run
+ * replaced by a single dash, matching the actual directory names observed
+ * on disk (e.g. C:\Users\foo\bar → C--Users-foo-bar on Windows,
+ * /Users/foo/bar → -Users-foo-bar on Unix).
  */
 function projectPathToId(projectPath: string): string {
-  // Remove leading slash/drive letter and convert separators to dashes
+  // Normalize separators then replace every non-alphanumeric character
+  // (colon, slash, backslash, dot, space, etc.) with a dash, collapsing
+  // consecutive runs.  Do NOT strip the drive letter – Claude keeps it.
   return projectPath
-    .replace(/^[A-Za-z]:[/\\]?/, '') // Remove Windows drive letter and optional separator
-    .replace(/^[/\\]+/, '')          // Remove leading slashes/backslashes
-    .replace(/\\/g, '-')             // Windows backslash to dash
-    .replace(/\//g, '-')             // Forward slash to dash
-    .replace(/-+/g, '-')             // Collapse multiple dashes
-    .replace(/^-/, '')               // Remove leading dash
-    .replace(/-$/, '');              // Remove trailing dash
+    .replace(/\\/g, '/')            // Normalize Windows separators
+    .replace(/[^a-zA-Z0-9]+/g, '-') // Replace every non-alphanumeric run with -
+    .replace(/^-/, '')              // Remove any leading dash
+    .replace(/-$/, '');             // Remove any trailing dash
 }
 
 /**

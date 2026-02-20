@@ -370,7 +370,6 @@ export interface ScoringWeights {
  */
 export interface RetrievalQuery {
   query: string;
-  embedding?: number[] | undefined;
   filters?: RetrievalFilters | undefined;
   limit?: number | undefined;
   includeDecayed?: boolean | undefined;
@@ -471,7 +470,6 @@ export interface PsychMemConfig {
   // Decay settings
   stmDecayRate: number;   // Lambda for STM (higher = faster decay)
   ltmDecayRate: number;   // Lambda for LTM (lower = slower decay)
-  decayCheckInterval: number; // How often to apply decay (ms)
   
   // Consolidation thresholds
   stmToLtmStrengthThreshold: number;  // Min strength to promote
@@ -487,11 +485,8 @@ export interface PsychMemConfig {
   // Auto-promote classifications
   autoPromoteToLtm: MemoryClassification[];
   
-  // Embedding settings
-  embeddingDimension: number;
-  
   // Transcript parsing settings
-  maxMemoriesPerStop: number;         // Based on human working memory (Cowan: 4±1)
+  maxMemoriesPerStop: number;         // Miller's Law: 7±2 items in working memory
   deduplicationThreshold: number;     // Keyword overlap threshold (0-1)
   
   // Context sweep settings
@@ -505,9 +500,8 @@ export const DEFAULT_CONFIG: PsychMemConfig = {
   agentType: 'claude-code',  // Default for backwards compatibility
   dbPath: '~/.psychmem/{agentType}/memory.db',  // Template with agent type
   
-  stmDecayRate: 0.1,      // Fast decay
+  stmDecayRate: 0.05,     // ~32-hour half-life (doubled from 0.1)
   ltmDecayRate: 0.01,     // Slow decay
-  decayCheckInterval: 60000, // 1 minute
   
   stmToLtmStrengthThreshold: 0.7,
   stmToLtmFrequencyThreshold: 3,
@@ -527,10 +521,8 @@ export const DEFAULT_CONFIG: PsychMemConfig = {
   
   autoPromoteToLtm: ['bugfix', 'learning', 'decision'],
   
-  embeddingDimension: 1536, // OpenAI ada-002 default
-  
-  // Transcript parsing (based on Cowan's working memory research: 4±1 items)
-  maxMemoriesPerStop: 4,
+  // Transcript parsing (Miller's Law: 7±2 items)
+  maxMemoriesPerStop: 7,
   deduplicationThreshold: 0.7, // 70% keyword overlap = duplicate
   
   // Context sweep settings

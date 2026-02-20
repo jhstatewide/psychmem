@@ -98,16 +98,42 @@ export class TranscriptParser {
         encoding: 'utf-8',
       });
 
+      // Read raw bytes separately to detect CRLF vs LF line endings
+      const rawStream = fs.createReadStream(resolvedPath, {
+        start: watermark,
+      });
+      // Detect line endings by scanning a small buffer
+      let crlfDetected = false;
+      let crlfSampleDone = false;
+      const sampleChunks: Buffer[] = [];
+      rawStream.on('data', (chunk: Buffer | string) => {
+        if (!crlfSampleDone) {
+          sampleChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+          const combined = Buffer.concat(sampleChunks);
+          if (combined.includes(0x0d /* \r */)) {
+            crlfDetected = true;
+            crlfSampleDone = true;
+          } else if (combined.length >= 4096) {
+            crlfSampleDone = true;
+          }
+        }
+      });
+      rawStream.on('error', () => { crlfSampleDone = true; });
+      await new Promise<void>((resolve) => rawStream.on('close', resolve));
+
       const rl = readline.createInterface({
         input: stream,
         crlfDelay: Infinity,
       });
 
       let bytesRead = watermark;
+      // readline with crlfDelay:Infinity strips \r, so each line's byte length
+      // needs +1 for \n (LF files) or +2 for \r\n (CRLF files)
+      const newlineBytes = crlfDetected ? 2 : 1;
 
       for await (const line of rl) {
-        // Track byte position (line + newline)
-        bytesRead += Buffer.byteLength(line, 'utf-8') + 1;
+        // Track byte position (line content + newline byte(s))
+        bytesRead += Buffer.byteLength(line, 'utf-8') + newlineBytes;
         
         if (line.trim().length === 0) continue;
         

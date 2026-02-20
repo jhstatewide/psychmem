@@ -72,7 +72,14 @@ export class ContextSweep {
     candidates.push(...repetitionCandidates);
     
     // Deduplicate and merge similar candidates
-    return this.deduplicateCandidates(candidates);
+    const deduped = this.deduplicateCandidates(candidates);
+
+    // Bug C fix: discard fragment/truncated summaries shorter than 20 meaningful chars
+    // Strip leading emoji/whitespace before measuring
+    return deduped.filter(c => {
+      const stripped = c.summary.replace(/^[\p{Emoji}\s]+/u, '').trim();
+      return stripped.length >= 20;
+    });
   }
 
   /**
@@ -501,15 +508,18 @@ export class ContextSweep {
     const emoji = this.getClassificationEmoji(classification);
     const toolName = event.toolName ?? 'unknown tool';
     
+    // Prefer toolOutput (clean result text) over the noisy concatenated event.content
+    const cleanContent = (event.toolOutput?.trim() || event.toolInput?.trim() || event.content).slice(0, 200);
+    
     if (classification === 'bugfix') {
-      // Try to extract the error and fix
+      // Try to extract the error and fix from tool output
       const errorMatch = event.toolOutput?.match(/error|exception|failed/i);
       if (errorMatch) {
         return `${emoji} ${toolName}: ${event.toolOutput?.slice(0, 200) ?? 'error encountered'}`;
       }
     }
     
-    return `${emoji} ${toolName}: ${event.content.slice(0, 200)}`;
+    return `${emoji} ${toolName}: ${cleanContent}`;
   }
 
   /**
@@ -640,6 +650,6 @@ export class ContextSweep {
     const intersection = new Set([...wordsA].filter(x => wordsB.has(x)));
     const union = new Set([...wordsA, ...wordsB]);
     
-    return intersection.size / union.size;
+    return union.size === 0 ? 0 : intersection.size / union.size;
   }
 }

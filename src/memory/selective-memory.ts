@@ -8,7 +8,6 @@
  * - Rule-based scoring (v1)
  * - STM/LTM allocation
  * - Consolidation (STM → LTM promotion)
- * - Reconsolidation (updating LTM with new evidence)
  */
 
 import type {
@@ -47,21 +46,30 @@ export class SelectiveMemory {
   ): MemoryUnit[] {
     const createdMemories: MemoryUnit[] = [];
 
+    // Load existing memories once: used for global dedup, novelty, and interference checks
+    const existingMemories = this.db.getTopMemories(200);
+
     for (const candidate of candidates) {
+      // Bug B fix: skip if a near-duplicate already exists in the DB (Jaccard >= 0.7)
+      const isDuplicate = existingMemories.some(
+        mem => this.calculateTextSimilarity(candidate.summary, mem.summary) >= 0.7
+      );
+      if (isDuplicate) continue;
+
       // Check if this should auto-promote to LTM
       const shouldAutoPromote = this.config.autoPromoteToLtm.includes(candidate.classification);
       
       // Calculate initial store
       const store: MemoryStore = shouldAutoPromote ? 'ltm' : 'stm';
       
-      // Calculate feature scores
-      const features = this.calculateFeatures(candidate);
+      // Calculate feature scores (passes cached list to avoid redundant DB queries)
+      const features = this.calculateFeatures(candidate, existingMemories);
       
       // Calculate initial strength
       const strength = this.calculateStrength(features);
       
       // Check for interference with existing memories
-      const interference = this.detectInterference(candidate);
+      const interference = this.detectInterference(candidate, existingMemories);
       
       // Determine project scope based on classification (v1.6)
       // User-level memories (constraint, preference, learning, procedural) don't have a project scope
@@ -101,13 +109,13 @@ export class SelectiveMemory {
   /**
    * Calculate feature vector for a candidate
    */
-  private calculateFeatures(candidate: MemoryCandidate): MemoryFeatureVector {
+  private calculateFeatures(candidate: MemoryCandidate, existingMemories: MemoryUnit[]): MemoryFeatureVector {
     return {
       recency: 0, // Just created
       frequency: 1, // First occurrence
       importance: candidate.preliminaryImportance,
       utility: 0.5, // Unknown until used
-      novelty: this.calculateNovelty(candidate),
+      novelty: this.calculateNovelty(candidate, existingMemories),
       confidence: candidate.confidence,
       interference: 0, // Calculated separately
     };
@@ -116,9 +124,7 @@ export class SelectiveMemory {
   /**
    * Calculate novelty score based on similarity to existing memories
    */
-  private calculateNovelty(candidate: MemoryCandidate): number {
-    const existingMemories = this.db.getTopMemories(50);
-    
+  private calculateNovelty(candidate: MemoryCandidate, existingMemories: MemoryUnit[]): number {
     if (existingMemories.length === 0) {
       return 1.0; // Everything is novel when memory is empty
     }
@@ -137,9 +143,7 @@ export class SelectiveMemory {
   /**
    * Detect interference with existing memories
    */
-  private detectInterference(candidate: MemoryCandidate): number {
-    const existingMemories = this.db.getTopMemories(50);
-    
+  private detectInterference(candidate: MemoryCandidate, existingMemories: MemoryUnit[]): number {
     // Look for conflicting information
     let interference = 0;
     
@@ -241,73 +245,6 @@ export class SelectiveMemory {
   }
 
   // ===========================================================================
-  // Reconsolidation (Updating LTM)
-  // ===========================================================================
-
-  /**
-   * Update existing LTM memory with new evidence
-   * This implements reconsolidation - updating memories when new info conflicts
-   */
-  reconsolidate(memoryId: string, newEvidence: {
-    content: string;
-    confidence: number;
-    sourceEventId: string;
-  }): ReconsolidationResult {
-    const memory = this.db.getMemory(memoryId);
-    if (!memory) {
-      return { success: false, reason: 'Memory not found' };
-    }
-
-    if (memory.status === 'pinned') {
-      return { success: false, reason: 'Memory is pinned and cannot be reconsolidated' };
-    }
-
-    // Check if new evidence conflicts with existing memory
-    const similarity = this.calculateTextSimilarity(newEvidence.content, memory.summary);
-    
-    if (similarity < 0.3) {
-      // Conflicting information - update the memory
-      // In v1, we'll just add the new evidence and adjust confidence
-      // In v2, we might create a new version or merge
-      
-      // Adjust confidence based on conflict
-      const newConfidence = (memory.confidence + newEvidence.confidence) / 2 * 0.8;
-      
-      // Update memory with note about conflict
-      const updatedSummary = `${memory.summary} [Updated: ${newEvidence.content}]`;
-      
-      return {
-        success: true,
-        updated: true,
-        oldConfidence: memory.confidence,
-        newConfidence,
-        conflict: true,
-      };
-    } else if (similarity > 0.7) {
-      // Reinforcing information - boost confidence
-      const newConfidence = Math.min(1, memory.confidence + newEvidence.confidence * 0.1);
-      
-      // Increment frequency (spaced repetition)
-      this.db.incrementFrequency(memoryId);
-      
-      return {
-        success: true,
-        updated: true,
-        oldConfidence: memory.confidence,
-        newConfidence,
-        conflict: false,
-        reinforced: true,
-      };
-    }
-
-    return {
-      success: true,
-      updated: false,
-      reason: 'No significant update needed',
-    };
-  }
-
-  // ===========================================================================
   // Decay Management
   // ===========================================================================
 
@@ -323,44 +260,6 @@ export class SelectiveMemory {
     };
   }
 
-  // ===========================================================================
-  // Utility Functions
-  // ===========================================================================
-
-  /**
-   * Update utility score based on retrieval usage
-   */
-  updateUtility(memoryId: string, wasUsed: boolean): void {
-    const memory = this.db.getMemory(memoryId);
-    if (!memory) return;
-
-    // Simple utility update: increase if used, decrease if not
-    const delta = wasUsed ? 0.1 : -0.05;
-    const newUtility = Math.max(0, Math.min(1, memory.utility + delta));
-
-    // Recalculate strength with new utility
-    const features: MemoryFeatureVector = {
-      recency: this.calculateRecency(memory.createdAt),
-      frequency: memory.frequency,
-      importance: memory.importance,
-      utility: newUtility,
-      novelty: memory.novelty,
-      confidence: memory.confidence,
-      interference: memory.interference,
-    };
-
-    const newStrength = this.calculateStrength(features);
-    this.db.updateMemoryStrength(memoryId, newStrength);
-  }
-
-  /**
-   * Calculate recency in hours
-   */
-  private calculateRecency(createdAt: Date): number {
-    const now = new Date();
-    return (now.getTime() - createdAt.getTime()) / (1000 * 60 * 60);
-  }
-
   /**
    * Simple text similarity (Jaccard index)
    */
@@ -371,7 +270,7 @@ export class SelectiveMemory {
     const intersection = new Set([...wordsA].filter(x => wordsB.has(x)));
     const union = new Set([...wordsA, ...wordsB]);
     
-    return intersection.size / union.size;
+    return union.size === 0 ? 0 : intersection.size / union.size;
   }
 
   /**
@@ -399,16 +298,6 @@ export interface ConsolidationResult {
   promoted: string[];
   decayed: string[];
   unchanged: string[];
-}
-
-export interface ReconsolidationResult {
-  success: boolean;
-  updated?: boolean;
-  oldConfidence?: number;
-  newConfidence?: number;
-  conflict?: boolean;
-  reinforced?: boolean;
-  reason?: string;
 }
 
 export interface DecayResult {

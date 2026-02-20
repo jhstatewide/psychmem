@@ -64,7 +64,7 @@ export class PostToolUseHook {
     
     // Add output preview (especially important for errors)
     if (data.toolOutput) {
-      const outputPreview = this.truncate(data.toolOutput, 500);
+      const outputPreview = this.truncate(data.toolOutput, 2000);
       parts.push(`Output: ${outputPreview}`);
     }
     

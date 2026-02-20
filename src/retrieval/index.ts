@@ -45,13 +45,12 @@ export class MemoryRetrieval {
   retrieveIndex(query: RetrievalQuery): RetrievalIndexItem[] {
     const limit = query.limit ?? this.config.defaultRetrievalLimit;
     
-    // Get memories based on filters
-    let memories = this.getFilteredMemories(query.filters, limit * 2); // Get extra for ranking
-    
-    // If we have a query embedding, use vector search
-    if (query.embedding) {
-      memories = this.rankByEmbedding(memories, query.embedding);
-    }
+    // Get memories based on filters.
+    // Fetch a large pool before ranking so that text-similarity scoring can
+    // surface relevant memories that aren't necessarily the strongest overall.
+    // Minimum 50, or 10× the requested limit, whichever is larger (cap at 200).
+    const poolSize = Math.min(200, Math.max(50, limit * 10));
+    let memories = this.getFilteredMemories(query.filters, poolSize);
     
     // If we have a text query, use text similarity
     if (query.query) {
@@ -146,24 +145,6 @@ export class MemoryRetrieval {
   }
 
   /**
-   * Rank memories by embedding similarity
-   */
-  private rankByEmbedding(memories: MemoryUnit[], queryEmbedding: number[]): MemoryUnit[] {
-    // Use vector search
-    const results = this.db.searchByEmbedding(queryEmbedding, memories.length);
-    
-    // Create a map of memory ID to distance
-    const distanceMap = new Map(results.map(r => [r.memoryId, r.distance]));
-    
-    // Sort by distance (lower is better)
-    return memories.sort((a, b) => {
-      const distA = distanceMap.get(a.id) ?? 999;
-      const distB = distanceMap.get(b.id) ?? 999;
-      return distA - distB;
-    });
-  }
-
-  /**
    * Rank memories by text similarity to query
    */
   private rankByTextSimilarity(memories: MemoryUnit[], query: string): MemoryUnit[] {
@@ -180,36 +161,56 @@ export class MemoryRetrieval {
   }
 
   /**
-   * Calculate relevance score for a memory given a query
+   * Calculate relevance score for a memory given a query.
+   * 
+   * Query-similarity-first: text similarity dominates (weight 2.0) so that
+   * different queries return meaningfully different rankings. Strength acts as
+   * a tiebreaker multiplier rather than an additive base, preventing high-
+   * strength memories from swamping low-similarity ones.
    */
   private calculateRelevance(memory: MemoryUnit, query: string): number {
-    // Base score is memory strength
-    let score = memory.strength;
-    
-    // Text similarity bonus
-    const textSimilarity = this.jaccardSimilarity(
-      memory.summary.toLowerCase(),
-      query.toLowerCase()
-    );
-    score += textSimilarity * 0.3;
-    
-    // Tag match bonus
-    const queryTerms = query.toLowerCase().split(/\s+/);
-    const tagMatches = memory.tags.filter(tag => 
-      queryTerms.some(term => tag.toLowerCase().includes(term))
+    const queryLower = query.toLowerCase();
+    const summaryLower = memory.summary.toLowerCase();
+
+    // 1. Jaccard similarity on full text (bag-of-words overlap)
+    const jaccard = this.jaccardSimilarity(summaryLower, queryLower);
+
+    // 2. Per-keyword hit scoring: count how many distinct query keywords appear
+    //    in the summary (substring match, not just exact word match)
+    const queryKeywords = queryLower
+      .split(/\s+/)
+      .filter(w => w.length > 2);
+    const keywordHits = queryKeywords.filter(kw =>
+      summaryLower.includes(kw)
     ).length;
-    score += tagMatches * 0.1;
-    
-    // Recency bonus (slight preference for recent memories)
+    const keywordScore = queryKeywords.length > 0
+      ? keywordHits / queryKeywords.length
+      : 0;
+
+    // 3. Tag match bonus
+    const tagMatches = memory.tags.filter(tag =>
+      queryKeywords.some(term => tag.toLowerCase().includes(term))
+    ).length;
+    const tagScore = tagMatches * 0.15;
+
+    // 4. Combined text similarity (Jaccard + keyword hits, weighted equally)
+    const textSimilarity = jaccard * 0.5 + keywordScore * 0.5;
+
+    // 5. Recency bonus (small, just a nudge toward fresher memories)
     const ageHours = (Date.now() - memory.createdAt.getTime()) / (1000 * 60 * 60);
-    const recencyBonus = Math.max(0, 0.1 - ageHours / 1000);
-    score += recencyBonus;
-    
+    const recencyBonus = Math.max(0, 0.05 - ageHours / 2000);
+
+    // 6. Final score: text similarity first, strength as a multiplier tiebreaker
+    //    textSimilarity * 2.0 gives a range of 0–2.0; multiply by strength
+    //    (0.0–1.0) so strong memories rank slightly above weak ones at equal
+    //    similarity, but a highly relevant weak memory beats an irrelevant strong one.
+    const score = textSimilarity * 2.0 * (0.5 + memory.strength * 0.5) + tagScore + recencyBonus;
+
     return Math.min(1, score);
   }
 
   /**
-   * Jaccard similarity between two strings
+   * Jaccard similarity between two strings (word-level)
    */
   private jaccardSimilarity(a: string, b: string): number {
     const wordsA = new Set(a.split(/\s+/).filter(w => w.length > 2));
@@ -318,8 +319,10 @@ export class MemoryRetrieval {
   ): RetrievalIndexItem[] {
     const limit = options.limit ?? this.config.defaultRetrievalLimit;
     
-    // Get scope-filtered memories
-    let memories = this.db.getMemoriesByScope(options.currentProject, limit * 2);
+    // Get scope-filtered memories — use a large pool so ranking can surface
+    // relevant memories that aren't the strongest by raw strength score.
+    const poolSize = Math.min(200, Math.max(50, limit * 10));
+    let memories = this.db.getMemoriesByScope(options.currentProject, poolSize);
     
     // If we have a text query, rank by similarity
     if (query) {

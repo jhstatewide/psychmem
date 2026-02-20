@@ -15,7 +15,7 @@
 import { PsychMemHooks, createPsychMemHooks } from './hooks/index.js';
 import { MemoryRetrieval } from './retrieval/index.js';
 import { MemoryDatabase, createMemoryDatabase } from './storage/database.js';
-import type { HookInput, PsychMemConfig } from './types/index.js';
+import type { HookInput, PsychMemConfig, MemoryUnit } from './types/index.js';
 import { DEFAULT_CONFIG } from './types/index.js';
 
 export class PsychMem {
@@ -24,9 +24,13 @@ export class PsychMem {
   private db!: MemoryDatabase;
   private config: PsychMemConfig;
   private initialized: boolean = false;
+  private _externalDb?: MemoryDatabase;
 
-  constructor(config: Partial<PsychMemConfig> = {}) {
+  constructor(config: Partial<PsychMemConfig> = {}, db?: MemoryDatabase) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+    if (db) {
+      this._externalDb = db;
+    }
   }
 
   /**
@@ -35,8 +39,8 @@ export class PsychMem {
   async init(): Promise<void> {
     if (this.initialized) return;
     
-    this.db = await createMemoryDatabase(this.config);
-    this.hooks = await createPsychMemHooks(this.config);
+    this.db = this._externalDb ?? await createMemoryDatabase(this.config);
+    this.hooks = await createPsychMemHooks(this.config, this.db);
     this.retrieval = new MemoryRetrieval(this.db, this.config);
     this.initialized = true;
   }
@@ -153,7 +157,7 @@ export class PsychMem {
     }
   }
 
-  private avgStrength(memories: any[]): number {
+  private avgStrength(memories: MemoryUnit[]): number {
     if (memories.length === 0) return 0;
     return memories.reduce((sum, m) => sum + m.strength, 0) / memories.length;
   }
@@ -162,8 +166,8 @@ export class PsychMem {
 /**
  * Create and initialize a PsychMem instance
  */
-export async function createPsychMem(config: Partial<PsychMemConfig> = {}): Promise<PsychMem> {
-  const psychmem = new PsychMem(config);
+export async function createPsychMem(config: Partial<PsychMemConfig> = {}, db?: MemoryDatabase): Promise<PsychMem> {
+  const psychmem = new PsychMem(config, db);
   await psychmem.init();
   return psychmem;
 }

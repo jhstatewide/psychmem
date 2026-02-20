@@ -130,28 +130,3 @@ async function createNodeDatabase(dbPath: string): Promise<SqliteDatabase> {
     },
   };
 }
-
-/**
- * Load sqlite-vec extension if available (Node.js only)
- * Returns true if loaded successfully
- */
-export async function loadVecExtension(db: SqliteDatabase): Promise<boolean> {
-  if (isBun()) {
-    // sqlite-vec doesn't work in Bun yet
-    console.warn('[PsychMem] Vector search disabled in Bun runtime');
-    return false;
-  }
-  
-  try {
-    const sqliteVec = await import('sqlite-vec');
-    const Database = (await import('better-sqlite3')).default;
-    
-    // We need the raw better-sqlite3 instance for loading extensions
-    // This is a workaround - in production, we'd refactor to expose the raw db
-    // For now, vector search is disabled in Bun
-    return false;
-  } catch (e) {
-    console.warn('[PsychMem] sqlite-vec not available:', e);
-    return false;
-  }
-}

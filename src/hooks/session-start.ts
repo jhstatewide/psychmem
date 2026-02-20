@@ -27,41 +27,26 @@ export class SessionStartHook {
    * Uses progressive disclosure: index with summaries + strength
    */
   generateContext(project: string, workingDirectory?: string): string {
-    // Get top memories by strength
-    const memories = this.db.getTopMemories(this.config.defaultRetrievalLimit);
+    // Normalise empty-string project to undefined (avoids matching orphan records)
+    const projectScope = project?.trim() || undefined;
+
+    // Get memories scoped to this project (user-level + project-specific)
+    let memories = this.db.getMemoriesByScope(projectScope, this.config.defaultRetrievalLimit);
+
+    // Fallback to global top memories when no scoped memories exist
+    if (memories.length === 0) {
+      memories = this.db.getTopMemories(this.config.defaultRetrievalLimit);
+    }
     
     if (memories.length === 0) {
       return this.formatEmptyContext();
     }
 
-    // Filter by relevance to project if we have matching memories
-    const projectMemories = this.filterByProject(memories, project);
-    const relevantMemories = projectMemories.length > 0 ? projectMemories : memories;
-
     // Build progressive disclosure index
-    const index = this.buildIndex(relevantMemories);
+    const index = this.buildIndex(memories);
     
     // Format context
     return this.formatContext(index, project);
-  }
-
-  /**
-   * Filter memories by project relevance
-   */
-  private filterByProject(memories: MemoryUnit[], project: string): MemoryUnit[] {
-    const projectLower = project.toLowerCase();
-    
-    return memories.filter(mem => {
-      // Check tags
-      if (mem.tags.some(t => t.toLowerCase().includes(projectLower))) {
-        return true;
-      }
-      // Check summary for project mention
-      if (mem.summary.toLowerCase().includes(projectLower)) {
-        return true;
-      }
-      return false;
-    });
   }
 
   /**

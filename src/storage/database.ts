@@ -19,13 +19,13 @@ import type {
 } from '../types/index.js';
 import { DEFAULT_CONFIG } from '../types/index.js';
 import { resolveDbPath } from '../utils/paths.js';
-import { createDatabase, loadVecExtension, isBun, type SqliteDatabase } from './sqlite-adapter.js';
+import { createDatabase, isBun, type SqliteDatabase } from './sqlite-adapter.js';
 
 export class MemoryDatabase {
   private db!: SqliteDatabase;
   private config: PsychMemConfig;
-  private vecEnabled: boolean = false;
   private initialized: boolean = false;
+  private _inTransaction: boolean = false;
 
   constructor(config: Partial<PsychMemConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -43,9 +43,6 @@ export class MemoryDatabase {
     
     // Set WAL mode
     this.db.exec('PRAGMA journal_mode = WAL');
-    
-    // Try to load vector extension (Node.js only)
-    this.vecEnabled = await loadVecExtension(this.db);
     
     this.initializeSchema();
     this.initialized = true;
@@ -66,6 +63,12 @@ export class MemoryDatabase {
   private initializeSchema(): void {
     // First, create base tables (without project_scope index)
     this.db.exec(`
+      -- Schema version table — bump SCHEMA_VERSION constant on breaking changes
+      CREATE TABLE IF NOT EXISTS schema_version (
+        version INTEGER NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+
       -- Sessions table
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -172,7 +175,23 @@ export class MemoryDatabase {
       CREATE INDEX IF NOT EXISTS idx_memory_classification ON memory_units(classification);
       CREATE INDEX IF NOT EXISTS idx_memory_session ON memory_units(session_id);
       CREATE INDEX IF NOT EXISTS idx_retrieval_session ON retrieval_logs(session_id);
+      -- Composite indexes for common query patterns
+      CREATE INDEX IF NOT EXISTS idx_memory_status_strength ON memory_units(status, strength);
+      CREATE INDEX IF NOT EXISTS idx_memory_session_status ON memory_units(session_id, status);
     `);
+
+    // Schema version check — fail loudly on mismatch (prevents silent corruption)
+    const SCHEMA_VERSION = 2;
+    const row = this.db.prepare('SELECT version FROM schema_version ORDER BY rowid DESC LIMIT 1').get() as { version: number } | undefined;
+    if (!row) {
+      // Fresh DB — stamp with current version
+      this.db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)').run(SCHEMA_VERSION, new Date().toISOString());
+    } else if (row.version !== SCHEMA_VERSION) {
+      throw new Error(
+        `psychmem DB schema mismatch: expected version ${SCHEMA_VERSION}, found ${row.version}. ` +
+        'Delete the database file or run migrations to continue.'
+      );
+    }
 
     // Migration: Add project_scope column if it doesn't exist (for existing DBs pre-v1.6)
     // MUST run before creating index on project_scope
@@ -182,16 +201,6 @@ export class MemoryDatabase {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_memory_project_scope ON memory_units(project_scope);
     `);
-
-    // Create vector table only if vec extension is loaded
-    if (this.vecEnabled) {
-      this.db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS memory_embeddings USING vec0(
-          memory_id TEXT PRIMARY KEY,
-          embedding FLOAT[${this.config.embeddingDimension}]
-        );
-      `);
-    }
   }
 
   /**
@@ -643,38 +652,6 @@ export class MemoryDatabase {
   }
 
   // ===========================================================================
-  // Embedding Operations (only available in Node.js with sqlite-vec)
-  // ===========================================================================
-
-  storeEmbedding(memoryId: string, embedding: number[]): void {
-    if (!this.vecEnabled) return;
-    this.ensureInit();
-    
-    this.db.prepare(`
-      INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding)
-      VALUES (?, ?)
-    `).run(memoryId, JSON.stringify(embedding));
-  }
-
-  searchByEmbedding(queryEmbedding: number[], limit: number = 10): Array<{ memoryId: string; distance: number }> {
-    if (!this.vecEnabled) return [];
-    this.ensureInit();
-    
-    const rows = this.db.prepare(`
-      SELECT memory_id, distance
-      FROM memory_embeddings
-      WHERE embedding MATCH ?
-      ORDER BY distance
-      LIMIT ?
-    `).all(JSON.stringify(queryEmbedding), limit) as any[];
-    
-    return rows.map(row => ({
-      memoryId: row.memory_id,
-      distance: row.distance,
-    }));
-  }
-
-  // ===========================================================================
   // Retrieval Log Operations
   // ===========================================================================
 
@@ -744,6 +721,29 @@ export class MemoryDatabase {
   }
 
   // ===========================================================================
+  // Transaction helpers
+  // ===========================================================================
+
+  beginTransaction(): void {
+    this.ensureInit();
+    if (this._inTransaction) return; // already in one — no nested BEGIN
+    this.db.exec('BEGIN IMMEDIATE');
+    this._inTransaction = true;
+  }
+
+  commitTransaction(): void {
+    if (!this._inTransaction) return;
+    this.db.exec('COMMIT');
+    this._inTransaction = false;
+  }
+
+  rollbackTransaction(): void {
+    if (!this._inTransaction) return;
+    try { this.db.exec('ROLLBACK'); } catch (_) { /* ignore if already rolled back */ }
+    this._inTransaction = false;
+  }
+
+  // ===========================================================================
   // Decay and Consolidation
   // ===========================================================================
 
@@ -763,17 +763,35 @@ export class MemoryDatabase {
     let decayedCount = 0;
     const decayThreshold = 0.1; // Below this, mark as decayed
 
-    for (const mem of memories) {
-      const updatedAt = new Date(mem.updated_at);
-      const dtHours = (now.getTime() - updatedAt.getTime()) / (1000 * 60 * 60);
-      const newStrength = mem.strength * Math.exp(-mem.decay_rate * dtHours);
+    // Skip starting a new transaction if the caller already opened one
+    const ownTransaction = !this._inTransaction;
+    if (ownTransaction) {
+      this.db.exec('BEGIN IMMEDIATE');
+      this._inTransaction = true;
+    }
+    try {
+      for (const mem of memories) {
+        const updatedAt = new Date(mem.updated_at);
+        const dtHours = (now.getTime() - updatedAt.getTime()) / (1000 * 60 * 60);
+        const newStrength = mem.strength * Math.exp(-mem.decay_rate * dtHours);
 
-      if (newStrength < decayThreshold) {
-        this.updateMemoryStatus(mem.id, 'decayed');
-        decayedCount++;
-      } else if (newStrength !== mem.strength) {
-        this.updateMemoryStrength(mem.id, newStrength);
+        if (newStrength < decayThreshold) {
+          this.updateMemoryStatus(mem.id, 'decayed');
+          decayedCount++;
+        } else if (newStrength !== mem.strength) {
+          this.updateMemoryStrength(mem.id, newStrength);
+        }
       }
+      if (ownTransaction) {
+        this.db.exec('COMMIT');
+        this._inTransaction = false;
+      }
+    } catch (err) {
+      if (ownTransaction) {
+        this.db.exec('ROLLBACK');
+        this._inTransaction = false;
+      }
+      throw err;
     }
 
     return decayedCount;
@@ -897,13 +915,6 @@ export class MemoryDatabase {
       version: row.version,
       evidence: [], // Loaded separately if needed
     };
-  }
-
-  /**
-   * Check if vector search is enabled
-   */
-  isVecEnabled(): boolean {
-    return this.vecEnabled;
   }
 
   /**

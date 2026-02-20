@@ -16,8 +16,10 @@
  *   psychmem remember <id>        Boost memory to LTM
  */
 
+import * as fs from 'fs';
 import { PsychMem, createPsychMem } from './index.js';
 import type { HookInput } from './types/index.js';
+import { TranscriptParser } from './transcript/parser.js';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -121,10 +123,19 @@ async function handleHook(psychmem: PsychMem, args: string[]) {
     process.exit(1);
   }
   
-  const rawInput = JSON.parse(inputJson);
+  let rawInput: Record<string, unknown>;
+  try {
+    rawInput = JSON.parse(inputJson);
+  } catch (e) {
+    process.stderr.write(JSON.stringify({
+      error: 'invalid_json',
+      message: e instanceof Error ? e.message : String(e),
+    }) + '\n');
+    process.exit(1);
+  }
   
   // Transform Claude Code hook input to our internal format
-  const input = transformClaudeCodeInput(rawInput);
+  const input = await transformClaudeCodeInput(rawInput);
   const result = await psychmem.handleHook(input);
   
   // Transform output for Claude Code format
@@ -158,7 +169,7 @@ async function handleHook(psychmem: PsychMem, args: string[]) {
  * Claude Code sends: hook_event_name, session_id, cwd, transcript_path, etc.
  * We expect: hookType, sessionId, timestamp, data
  */
-function transformClaudeCodeInput(raw: Record<string, unknown>): HookInput {
+async function transformClaudeCodeInput(raw: Record<string, unknown>): Promise<HookInput> {
   // Detect if this is already in our internal format
   if (raw.hookType && raw.data) {
     return raw as unknown as HookInput;
@@ -186,8 +197,9 @@ function transformClaudeCodeInput(raw: Record<string, unknown>): HookInput {
   
   switch (hookType) {
     case 'SessionStart': {
-      // Extract project name from cwd
-      const project = cwd ? cwd.split(/[/\\]/).pop() ?? 'unknown' : 'unknown';
+      // Extract project name from cwd, stripping any trailing slash first
+      const normalizedCwd = cwd ? cwd.replace(/[/\\]+$/, '') : '';
+      const project = normalizedCwd ? normalizedCwd.split(/[/\\]/).pop() ?? 'unknown' : 'unknown';
       const source = raw.source as string | undefined;
       data = {
         project,
@@ -223,13 +235,23 @@ function transformClaudeCodeInput(raw: Record<string, unknown>): HookInput {
     
     case 'Stop': {
       const stopReason = raw.stop_reason as string | undefined;
-      // For Stop, we could read the transcript to get conversation content
-      // For now, just capture the stop reason
+      // Read the full transcript to provide conversationText for memory extraction
+      let conversationText: string | undefined;
+      if (transcriptPath) {
+        try {
+          const parser = new TranscriptParser();
+          const parseResult = await parser.parseFromWatermark(transcriptPath, 0);
+          if (parseResult.entries.length > 0) {
+            conversationText = TranscriptParser.entriesToConversationText(parseResult.entries);
+          }
+        } catch (e) {
+          process.stderr.write(`[psychmem] Warning: could not read transcript at ${transcriptPath}: ${e instanceof Error ? e.message : String(e)}\n`);
+        }
+      }
       data = {
         reason: 'user' as const,
         stopReason,
-        // Note: We'd need to read transcript_path to get full conversation
-        // For now, skip conversationText as it would require file I/O
+        ...(conversationText !== undefined ? { conversationText } : {}),
         metadata: { transcriptPath, cwd }
       };
       break;

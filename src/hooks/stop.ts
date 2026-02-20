@@ -98,10 +98,9 @@ export class StopHook {
       }
     );
     
-    // Update watermark in database
-    this.db.updateSessionWatermark(sessionId, sweepResult.newWatermark);
-    
     if (sweepResult.candidates.length === 0) {
+      // Safe to advance watermark — no writes will follow
+      this.db.updateSessionWatermark(sessionId, sweepResult.newWatermark);
       return {
         memoriesCreated: 0,
         memoryIds: [],
@@ -116,10 +115,14 @@ export class StopHook {
     }
     
     // Process candidates through selective memory (with sessionId and projectScope)
+    const projectScope = session.project?.trim() || undefined;
     const createdMemories = this.selectiveMemory.processCandidates(
       sweepResult.candidates,
-      { sessionId, ...(session.project ? { projectScope: session.project } : {}) }
+      { sessionId, ...(projectScope ? { projectScope } : {}) }
     );
+
+    // Advance watermark only AFTER memories are written — prevents data loss on crash
+    this.db.updateSessionWatermark(sessionId, sweepResult.newWatermark);
     
     return {
       memoriesCreated: createdMemories.length,
@@ -176,9 +179,10 @@ export class StopHook {
     const limitedCandidates = this.applyLimit(candidates);
 
     // Stage 2: Selective Memory - Score and store (with sessionId and projectScope from session)
+    const projectScope = session?.project?.trim() || undefined;
     const createdMemories = this.selectiveMemory.processCandidates(
       limitedCandidates,
-      { sessionId, ...(session?.project ? { projectScope: session.project } : {}) }
+      { sessionId, ...(projectScope ? { projectScope } : {}) }
     );
     
     // Generate summary

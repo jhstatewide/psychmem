@@ -3,16 +3,7 @@
  * Common interfaces for agent-specific adapters
  */
 
-import type { MemoryUnit } from '../types/index.js';
-
-// =============================================================================
-// Agent Types
-// =============================================================================
-
-/**
- * Supported AI agent types
- */
-export type AgentType = 'claude-code' | 'opencode';
+import type { MemoryUnit, AgentType } from '../types/index.js';
 
 // =============================================================================
 // OpenCode Types (from @opencode-ai/plugin)

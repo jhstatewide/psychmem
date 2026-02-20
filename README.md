@@ -42,15 +42,15 @@ Human memory operates in two stages:
 - **Long-Term Memory (LTM)**: Unlimited capacity, slow decay, consolidated through rehearsal/importance
 
 PsychMem implements this with separate STM/LTM stores and different decay rates:
-- STM decay rate: `λ = 0.1` (fast - memories lose ~10% strength per hour)
+- STM decay rate: `λ = 0.05` (fast - memories lose ~5% strength per hour, ~32h half-life)
 - LTM decay rate: `λ = 0.01` (slow - memories lose ~1% strength per hour)
 
 ### Working Memory Capacity (Cowan, 2001)
 
-Research shows humans can hold **4 ± 1 items** in working memory simultaneously. PsychMem respects this limit:
+Research shows humans can hold **4 ± 1 items** in working memory simultaneously. PsychMem uses a slightly higher limit based on Miller's 7±2:
 
 ```typescript
-maxMemoriesPerStop: 4  // Extract at most 4 memories per conversation turn
+maxMemoriesPerStop: 7  // Extract at most 7 memories per conversation turn
 ```
 
 This prevents memory bloat while ensuring the most important information is captured.
@@ -430,7 +430,50 @@ Add to `opencode.json`:
 
 ### Claude Code Integration
 
-PsychMem writes to Claude Code's auto-memory location:
+PsychMem integrates with Claude Code via the hooks system.
+
+**Linux/macOS:**
+```bash
+# Clone to Claude Code's plugins directory
+git clone https://github.com/muratg98/psychmem.git ~/.claude/plugins/psychmem
+
+# Install and build
+cd ~/.claude/plugins/psychmem
+npm install
+npm run build
+```
+
+**Windows (PowerShell):**
+```powershell
+# Clone to Claude Code's plugins directory
+git clone https://github.com/muratg98/psychmem.git "$env:USERPROFILE\.claude\plugins\psychmem"
+
+# Install and build
+cd "$env:USERPROFILE\.claude\plugins\psychmem"
+npm install
+npm run build
+```
+
+Then register the hooks in your Claude Code settings (`~/.claude/settings.json`):
+
+```json
+{
+  "plugins": [
+    {
+      "name": "psychmem",
+      "root": "~/.claude/plugins/psychmem",
+      "hooks": "hooks/hooks.json"
+    }
+  ]
+}
+```
+
+PsychMem will then automatically:
+- **Inject** relevant memories at session start
+- **Track** tool usage during the session (async, non-blocking)
+- **Extract** memories when you stop or end a session
+
+Memories are written to Claude Code's auto-loaded memory location:
 - `~/.claude/projects/<project>/memory/MEMORY.md` (first 200 lines auto-loaded)
 - Topic files: `constraints.md`, `learnings.md`, `decisions.md`, `bugfixes.md`
 
@@ -460,7 +503,7 @@ PSYCHMEM_MESSAGE_IMPORTANCE_THRESHOLD=0.5 # Min importance for extraction
 ```typescript
 const DEFAULT_CONFIG: PsychMemConfig = {
   // Decay rates (per hour)
-  stmDecayRate: 0.1,      // Fast decay for STM
+  stmDecayRate: 0.05,     // ~32-hour half-life
   ltmDecayRate: 0.01,     // Slow decay for LTM
   
   // Consolidation thresholds
@@ -478,8 +521,8 @@ const DEFAULT_CONFIG: PsychMemConfig = {
     interference: -0.10,
   },
   
-  // Working memory limit (Cowan's 4±1)
-  maxMemoriesPerStop: 4,
+  // Working memory limit (Miller's 7±2)
+  maxMemoriesPerStop: 7,
   
   // Deduplication
   deduplicationThreshold: 0.7,
