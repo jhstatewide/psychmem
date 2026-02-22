@@ -95,6 +95,47 @@ function getSessionIdFromEvent(properties?: Record<string, unknown>): string | u
   return undefined;
 }
 
+// =============================================================================
+// Plugin config helpers — shared with plugin.js and src/index.ts default export
+// =============================================================================
+
+function parseEnvBool(value: string | undefined, defaultValue: boolean): boolean {
+  if (value === undefined) return defaultValue;
+  return value.toLowerCase() === 'true' || value === '1';
+}
+
+function parseEnvNumber(value: string | undefined, defaultValue: number): number {
+  if (value === undefined) return defaultValue;
+  const parsed = parseInt(value, 10);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
+function parseEnvFloat(value: string | undefined, defaultValue: number): number {
+  if (value === undefined) return defaultValue;
+  const parsed = parseFloat(value);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
+/**
+ * Build PsychMemConfig from PSYCHMEM_* environment variables.
+ * Used by plugin.js and the default export in src/index.ts.
+ */
+export function parsePluginConfig(): Partial<PsychMemConfig> {
+  return {
+    opencode: {
+      injectOnCompaction:          parseEnvBool  (process.env['PSYCHMEM_INJECT_ON_COMPACTION'],         true),
+      extractOnCompaction:         parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_COMPACTION'],        true),
+      extractOnMessage:            parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_MESSAGE'],           true),
+      maxCompactionMemories:       parseEnvNumber(process.env['PSYCHMEM_MAX_COMPACTION_MEMORIES'],      10),
+      maxSessionStartMemories:     parseEnvNumber(process.env['PSYCHMEM_MAX_SESSION_MEMORIES'],         10),
+      messageWindowSize:           parseEnvNumber(process.env['PSYCHMEM_MESSAGE_WINDOW_SIZE'],          3),
+      messageImportanceThreshold:  parseEnvFloat (process.env['PSYCHMEM_MESSAGE_IMPORTANCE_THRESHOLD'], 0.5),
+    },
+  };
+}
+
+// =============================================================================
+
 /**
  * OpenCode adapter instance state
  */
@@ -104,6 +145,8 @@ interface OpenCodeAdapterState {
   retrieval: MemoryRetrieval;
   config: PsychMemConfig;
   currentSessionId: string | null;
+  /** Sessions that have already received a memory injection this process lifetime */
+  injectedSessions: Set<string>;
   worktree: string;
   client: OpenCodeClient;
 }
@@ -140,6 +183,7 @@ export async function createOpenCodePlugin(
     retrieval,
     config,
     currentSessionId: null,
+    injectedSessions: new Set<string>(),
     worktree,
     client: ctx.client,
   };
@@ -293,6 +337,8 @@ async function handleSessionCreated(
   }
   
   state.currentSessionId = sessionId;
+  // Mark new session injected immediately — injection happens below before returning
+  state.injectedSessions.add(sessionId);
   debugLog(`state.currentSessionId set to: ${sessionId}`);
   
   // Create session in PsychMem
@@ -471,18 +517,35 @@ async function handleMessageUpdated(
   // SDK shape: properties = { info: Message }
   // Message has sessionID directly on info
   const sessionId = eventProps.info?.sessionID ?? eventProps.sessionID ?? state.currentSessionId;
-  debugLog(`handleMessageUpdated: sessionId=${sessionId ?? 'NONE'}, role=${eventProps.info?.role ?? eventProps.role ?? 'NONE'}`);
+  debugLog(`handleMessageUpdated: sessionId=${sessionId ?? 'NONE'}`);
   
   if (!sessionId) {
     debugLog('handleMessageUpdated: no sessionId — BAILING');
     return;
   }
-  
+
   // Update state if needed
   if (!state.currentSessionId && sessionId) {
     state.currentSessionId = sessionId;
   }
-  
+
+  // LAZY INJECTION: inject memories on the first user message in a continued session.
+  // Continued sessions (-c flag) never fire session.created, so we gate on the first
+  // user role message instead. We await completion before proceeding to extraction
+  // so injection and extraction never run concurrently for the same message.
+  const role = eventProps.info?.role ?? eventProps.role;
+  if (role === 'user' && !state.injectedSessions.has(sessionId)) {
+    state.injectedSessions.add(sessionId);
+    debugLog(`Lazy injection: first user message in session ${sessionId}`);
+    const memories = await getRelevantMemories(state, state.config.opencode.maxSessionStartMemories);
+    if (memories.length > 0) {
+      const memoryContext = formatMemoriesForInjection(memories, 'session_start', state.worktree);
+      await injectContext(state, sessionId, memoryContext);
+      log(ctx, 'info', `Lazy injection: ${memories.length} memories on continued session`);
+      debugLog(`Lazy injection: injected ${memories.length} memories`);
+    }
+  }
+
   // Fetch recent messages for context (sliding window)
   const windowSize = state.config.opencode.messageWindowSize;
   let messages: OpenCodeMessageContainer[];

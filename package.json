@@ -1,6 +1,6 @@
 {
   "name": "psychmem",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "description": "Psych-grounded selective memory system for AI agents with STM/LTM consolidation, decay curves, and learned importance weights",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -66,12 +66,10 @@
     "README.md"
   ],
   "dependencies": {
-    "better-sqlite3": "^12.6.2",
     "uuid": "^13.0.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^25.2.3",
+    "@types/node": "^25.3.0",
     "esbuild": "^0.27.3",
     "typescript": "^5.9.3"
   },

@@ -1,9 +1,9 @@
 /**
  * SQLite Adapter - Runtime-agnostic SQLite interface
- * 
- * Supports both:
- * - better-sqlite3 (Node.js) - for Claude Code CLI
- * - bun:sqlite (Bun) - for OpenCode plugins
+ *
+ * Supports:
+ * - bun:sqlite  (Bun runtime)
+ * - node:sqlite (Node.js 22+, no native addons required)
  */
 
 // Declare Bun types for runtime detection
@@ -33,7 +33,7 @@ export function isBun(): boolean {
 }
 
 /**
- * Create a SQLite database connection using the appropriate driver
+ * Create a SQLite database connection using the appropriate native driver
  */
 export async function createDatabase(dbPath: string): Promise<SqliteDatabase> {
   if (isBun()) {
@@ -47,26 +47,23 @@ export async function createDatabase(dbPath: string): Promise<SqliteDatabase> {
  * Create database using bun:sqlite
  */
 async function createBunDatabase(dbPath: string): Promise<SqliteDatabase> {
-  // Dynamic import for bun:sqlite
   // @ts-expect-error - bun:sqlite is only available in Bun runtime
   const { Database } = await import('bun:sqlite');
   const db = new Database(dbPath);
-  
-  // Wrapper to match our interface
+
   return {
     exec(sql: string): void {
       db.exec(sql);
     },
-    
+
     prepare(sql: string): SqliteStatement {
       const stmt = db.prepare(sql);
       return {
         run(...params: unknown[]) {
-          // bun:sqlite's run returns the statement, we need to adapt
-          const result = stmt.run(...params);
+          stmt.run(...params);
           return {
-            changes: (db as any).changes ?? 0,
-            lastInsertRowid: (db as any).lastInsertRowid ?? 0,
+            changes: db.changes as number,
+            lastInsertRowid: db.lastInsertRowid as number | bigint,
           };
         },
         get(...params: unknown[]) {
@@ -77,39 +74,38 @@ async function createBunDatabase(dbPath: string): Promise<SqliteDatabase> {
         },
       };
     },
-    
+
     close(): void {
       db.close();
     },
-    
+
     pragma(pragma: string): unknown {
-      // bun:sqlite handles pragma via exec or query
       return db.query(`PRAGMA ${pragma}`).get();
     },
   };
 }
 
 /**
- * Create database using better-sqlite3
+ * Create database using node:sqlite (Node.js 22+)
  */
 async function createNodeDatabase(dbPath: string): Promise<SqliteDatabase> {
-  // Dynamic import for better-sqlite3
-  const Database = (await import('better-sqlite3')).default;
-  const db = new Database(dbPath);
-  
+  // node:sqlite is synchronous — dynamic import keeps the async adapter signature uniform
+  const { DatabaseSync } = await import('node:sqlite' as string);
+  const db = new DatabaseSync(dbPath);
+
   return {
     exec(sql: string): void {
       db.exec(sql);
     },
-    
+
     prepare(sql: string): SqliteStatement {
       const stmt = db.prepare(sql);
       return {
         run(...params: unknown[]) {
           const result = stmt.run(...params);
           return {
-            changes: result.changes,
-            lastInsertRowid: result.lastInsertRowid,
+            changes: result.changes as number,
+            lastInsertRowid: result.lastInsertRowid as number | bigint,
           };
         },
         get(...params: unknown[]) {
@@ -120,13 +116,13 @@ async function createNodeDatabase(dbPath: string): Promise<SqliteDatabase> {
         },
       };
     },
-    
+
     close(): void {
       db.close();
     },
-    
+
     pragma(pragma: string): unknown {
-      return db.pragma(pragma);
+      return db.prepare(`PRAGMA ${pragma}`).get();
     },
   };
 }

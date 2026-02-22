@@ -227,3 +227,17 @@ export type {
 // Re-export adapters
 export { createOpenCodePlugin, OpenCodeAdapter } from './adapters/opencode/index.js';
 export { ClaudeCodeAdapter, createClaudeCodeAdapter } from './adapters/claude-code/index.js';
+
+// =============================================================================
+// Default export for OpenCode plugin system
+// When OpenCode loads "psychmem" via "plugin": ["psychmem"] it calls the
+// default export as an async function with ctx and expects plugin hooks back.
+// =============================================================================
+import { createOpenCodePlugin, parsePluginConfig } from './adapters/opencode/index.js';
+import type { OpenCodePluginContext, OpenCodePluginHooks } from './adapters/types.js';
+
+export default async function PsychMemPlugin(
+  ctx: OpenCodePluginContext
+): Promise<OpenCodePluginHooks> {
+  return createOpenCodePlugin(ctx, parsePluginConfig());
+}
