@@ -447,8 +447,8 @@ export interface OpenCodeConfig {
   injectOnCompaction: boolean;
   /** Extract memories from conversation before compaction (default: true) */
   extractOnCompaction: boolean;
-  /** Extract memories per message instead of only on stop (default: true) */
-  extractOnMessage: boolean;
+  /** Extract memories on each user message submission via chat.message hook (default: true) */
+  extractOnUserMessage: boolean;
   /** Max memories to inject on compaction (default: 10) */
   maxCompactionMemories: number;
   /** Max memories to inject on session start (default: 10) */
@@ -532,7 +532,7 @@ export const DEFAULT_CONFIG: PsychMemConfig = {
   opencode: {
     injectOnCompaction: true,
     extractOnCompaction: true,
-    extractOnMessage: true,  // v1.9: Per-message extraction enabled by default
+    extractOnUserMessage: true,  // Per-user-message extraction via chat.message hook
     maxCompactionMemories: 10,
     maxSessionStartMemories: 10,
     messageWindowSize: 3,    // Include last 3 messages for context

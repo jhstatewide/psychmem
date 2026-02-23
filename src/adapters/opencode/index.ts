@@ -20,7 +20,8 @@ import type {
   OpenCodeToolInput,
   OpenCodeToolOutput,
   OpenCodeCompactionInput,
-  OpenCodeMessageUpdatedEvent,
+  OpenCodeChatMessageInput,
+  OpenCodeChatMessageOutput,
   PsychMemAdapter,
 } from '../types.js';
 import type {
@@ -125,7 +126,7 @@ export function parsePluginConfig(): Partial<PsychMemConfig> {
     opencode: {
       injectOnCompaction:          parseEnvBool  (process.env['PSYCHMEM_INJECT_ON_COMPACTION'],         true),
       extractOnCompaction:         parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_COMPACTION'],        true),
-      extractOnMessage:            parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_MESSAGE'],           true),
+      extractOnUserMessage:        parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_USER_MESSAGE'] ?? process.env['PSYCHMEM_EXTRACT_ON_MESSAGE'], true),
       maxCompactionMemories:       parseEnvNumber(process.env['PSYCHMEM_MAX_COMPACTION_MEMORIES'],      10),
       maxSessionStartMemories:     parseEnvNumber(process.env['PSYCHMEM_MAX_SESSION_MEMORIES'],         10),
       messageWindowSize:           parseEnvNumber(process.env['PSYCHMEM_MESSAGE_WINDOW_SIZE'],          3),
@@ -207,7 +208,7 @@ export async function createOpenCodePlugin(
       
       // For handled events, log full details; for others, just log type
       const handledEvents = new Set([
-        'session.created', 'session.idle', 'session.deleted', 'session.error', 'message.updated',
+        'session.created', 'session.idle', 'session.deleted', 'session.error',
       ]);
       
       if (handledEvents.has(event.type)) {
@@ -230,13 +231,6 @@ export async function createOpenCodePlugin(
         case 'session.deleted':
         case 'session.error':
           await handleSessionEnd(state, ctx, event.type, sessionId);
-          break;
-        
-        // v1.9: Per-message memory extraction
-        case 'message.updated':
-          if (state.config.opencode.extractOnMessage) {
-            await handleMessageUpdated(state, ctx, event.properties as OpenCodeMessageUpdatedEvent);
-          }
           break;
       }
     },
@@ -264,7 +258,21 @@ export async function createOpenCodePlugin(
       
       await handlePostToolUse(state, ctx, input, output);
     },
-    
+
+    /**
+     * Fires exactly once per user turn, before the assistant starts responding.
+     * 
+     * Two responsibilities:
+     * 1. LAZY INJECTION — for continued sessions (-c flag) that skip session.created,
+     *    inject memories on the first user message of the session.
+     * 2. PER-MESSAGE EXTRACTION — fire-and-forget extraction after each user message.
+     *    Only runs when extractOnUserMessage is enabled and the message passes
+     *    the importance pre-filter (positive signals present, not a pure task command).
+     */
+    'chat.message': async (input: OpenCodeChatMessageInput, output: OpenCodeChatMessageOutput) => {
+      await handleUserMessage(state, ctx, input, output);
+    },
+
     /**
       * Experimental: Extract and inject memories during session compaction
       * 
@@ -498,43 +506,44 @@ async function handleSessionEnd(
 }
 
 /**
- * Handle message.updated event - v1.9 per-message memory extraction
- * 
- * This enables real-time memory extraction as conversations happen,
- * rather than waiting until session end (session.idle).
- * 
- * Psychology basis: Human memory encodes continuously, not just at conversation end.
- * Benefits:
- * - Important info captured even if session crashes
- * - Working memory (STM) updated in real-time
- * - Better context as conversation progresses
+ * Handle chat.message hook — fires exactly once per user turn, before the assistant responds.
+ *
+ * Two responsibilities:
+ * 1. LAZY INJECTION — for continued sessions (-c flag) that skip session.created,
+ *    inject memories on the first user message of the session. Awaited so that injection
+ *    completes before the extraction branch runs (no concurrent writes).
+ * 2. PER-MESSAGE EXTRACTION — if extractOnUserMessage is enabled, extract text from the
+ *    user's message parts (no API call needed), run the importance pre-filter, and if it
+ *    passes, fire the full extraction pipeline fire-and-forget so the assistant can start
+ *    responding immediately.
+ *
+ * The extraction uses a sliding window of the last N messages fetched from the session
+ * API — this gives context around the user message, not just the message in isolation.
  */
-async function handleMessageUpdated(
+async function handleUserMessage(
   state: OpenCodeAdapterState,
   ctx: OpenCodePluginContext,
-  eventProps: OpenCodeMessageUpdatedEvent
+  input: OpenCodeChatMessageInput,
+  output: OpenCodeChatMessageOutput
 ): Promise<void> {
-  // SDK shape: properties = { info: Message }
-  // Message has sessionID directly on info
-  const sessionId = eventProps.info?.sessionID ?? eventProps.sessionID ?? state.currentSessionId;
-  debugLog(`handleMessageUpdated: sessionId=${sessionId ?? 'NONE'}`);
-  
+  const sessionId = input.sessionID ?? state.currentSessionId;
+  debugLog(`handleUserMessage: sessionId=${sessionId ?? 'NONE'}, messageID=${input.messageID ?? 'NONE'}`);
+
   if (!sessionId) {
-    debugLog('handleMessageUpdated: no sessionId — BAILING');
+    debugLog('handleUserMessage: no sessionId — BAILING');
     return;
   }
 
-  // Update state if needed
-  if (!state.currentSessionId && sessionId) {
+  // Ensure state is up to date
+  if (!state.currentSessionId) {
     state.currentSessionId = sessionId;
   }
 
-  // LAZY INJECTION: inject memories on the first user message in a continued session.
-  // Continued sessions (-c flag) never fire session.created, so we gate on the first
-  // user role message instead. We await completion before proceeding to extraction
-  // so injection and extraction never run concurrently for the same message.
-  const role = eventProps.info?.role ?? eventProps.role;
-  if (role === 'user' && !state.injectedSessions.has(sessionId)) {
+  // --- LAZY INJECTION ---
+  // For continued sessions (-c) that never fire session.created, inject memories
+  // on the first chat.message of the session. Awaited before extraction to avoid
+  // concurrent DB writes.
+  if (!state.injectedSessions.has(sessionId)) {
     state.injectedSessions.add(sessionId);
     debugLog(`Lazy injection: first user message in session ${sessionId}`);
     const memories = await getRelevantMemories(state, state.config.opencode.maxSessionStartMemories);
@@ -546,91 +555,104 @@ async function handleMessageUpdated(
     }
   }
 
-  // Fetch recent messages for context (sliding window)
-  const windowSize = state.config.opencode.messageWindowSize;
-  let messages: OpenCodeMessageContainer[];
-  try {
-    const response = await state.client.session.messages({
-      path: { id: sessionId },
-    });
-    messages = response.data;
-    debugLog(`handleMessageUpdated: fetched ${messages?.length ?? 0} messages`);
-  } catch (error) {
-    debugLog(`handleMessageUpdated: failed to fetch messages: ${error}`);
+  // --- PER-MESSAGE EXTRACTION ---
+  if (!state.config.opencode.extractOnUserMessage) {
+    debugLog('handleUserMessage: extractOnUserMessage disabled — skipping extraction');
     return;
   }
-  
-  if (!messages || messages.length === 0) {
-    debugLog('handleMessageUpdated: no messages');
+
+  // Extract text from the user message parts directly — no API call needed for the filter.
+  const userText = output.parts
+    .filter(p => p.type === 'text' && p.text)
+    .map(p => p.text!)
+    .join('\n')
+    .trim();
+
+  if (!userText) {
+    debugLog('handleUserMessage: no text content in user message parts, skipping extraction');
     return;
   }
-  
-  // Get the most recent messages within the window
-  const recentMessages = messages.slice(-windowSize);
-  
-  // Extract text from recent messages only
-  const conversationText = extractConversationText(recentMessages);
-  
-  if (!conversationText.trim()) {
-    debugLog('handleMessageUpdated: no text content in recent messages');
-    return;
-  }
-  
-  debugLog(`handleMessageUpdated: extracted ${conversationText.length} chars from ${recentMessages.length} recent messages`);
-  
-  // Quick importance pre-filter: check if there are any high-importance signals
-  // before running the full extraction pipeline
-  const hasImportantContent = preFilterImportance(
-    conversationText,
-    state.config.opencode.messageImportanceThreshold
-  );
-  
+
+  debugLog(`handleUserMessage: user message text (${userText.length} chars): ${userText.slice(0, 120)}`);
+
+  // Importance pre-filter using just the user message text (fast, no API call).
+  const hasImportantContent = preFilterImportance(userText, state.config.opencode.messageImportanceThreshold);
+
   if (!hasImportantContent) {
-    debugLog('handleMessageUpdated: no high-importance signals detected, skipping extraction');
+    debugLog('handleUserMessage: message did not pass importance pre-filter, skipping extraction');
     return;
   }
-  
-  // Process through Stop hook (extracts memories)
-  const hookInput: HookInput = {
-    hookType: 'Stop',
-    sessionId,
-    timestamp: new Date().toISOString(),
-    data: {
-      reason: 'user',
-      conversationText,
-      metadata: {
-        agentType: 'opencode',
-        isPerMessageExtraction: true,
-        windowSize,
-        messageCount: recentMessages.length,
-      },
-    } as StopData,
-  };
-  
-  const result = await state.psychmem.handleHook(hookInput);
-  
-  if (result.success && result.memoriesCreated && result.memoriesCreated > 0) {
-    debugLog(`handleMessageUpdated: created ${result.memoriesCreated} memories from per-message extraction`);
-    log(ctx, 'debug', `Per-message extraction: ${result.memoriesCreated} memories from ${recentMessages.length} messages`);
-  } else {
-    debugLog('handleMessageUpdated: no memories created');
-  }
+
+  // Fire-and-forget: fetch context window and run extraction async.
+  // The assistant starts responding immediately; extraction runs in the background.
+  const windowSize = state.config.opencode.messageWindowSize;
+  const capturedSessionId = sessionId;
+
+  void (async () => {
+    try {
+      const response = await state.client.session.messages({ path: { id: capturedSessionId } });
+      const messages = response.data;
+      if (!messages || messages.length === 0) return;
+
+      const recentMessages = messages.slice(-windowSize);
+      const conversationText = extractConversationText(recentMessages);
+      if (!conversationText.trim()) return;
+
+      const hookInput: HookInput = {
+        hookType: 'Stop',
+        sessionId: capturedSessionId,
+        timestamp: new Date().toISOString(),
+        data: {
+          reason: 'user',
+          conversationText,
+          metadata: {
+            agentType: 'opencode',
+            isPerUserMessageExtraction: true,
+            windowSize,
+            messageCount: recentMessages.length,
+          },
+        } as StopData,
+      };
+
+      const result = await state.psychmem.handleHook(hookInput);
+
+      if (result.success && result.memoriesCreated && result.memoriesCreated > 0) {
+        debugLog(`handleUserMessage: created ${result.memoriesCreated} memories from per-user-message extraction`);
+        log(ctx, 'debug', `Per-message extraction: ${result.memoriesCreated} memories`);
+      } else {
+        debugLog('handleUserMessage: extraction ran, no new memories created');
+      }
+    } catch (err) {
+      debugLog(`handleUserMessage: extraction error — ${err}`);
+    }
+  })();
 }
 
 /**
- * Pre-filter importance check for per-message extraction
- * 
- * This is a lightweight check to avoid running the full extraction pipeline
- * on every message. We look for quick indicators of important content:
- * - Explicit remember requests
- * - Emphasis markers (caps, exclamation)
- * - Key signal words (never, always, important, bug, error, fixed)
- * - Corrections or negations
+ * Pre-filter for per-user-message extraction.
+ *
+ * Two gates (both must pass):
+ *
+ * 1. DISQUALIFICATION gate — skips extraction for pure task commands.
+ *    If the message starts with an imperative verb and has zero positive
+ *    memory signals, it is a task request with nothing worth storing.
+ *
+ * 2. POSITIVE SIGNAL gate — at least (threshold * 4) of the 7 positive
+ *    pattern groups must match. Default threshold 0.5 → at least 2 matches.
  */
 function preFilterImportance(text: string, threshold: number): boolean {
-  const lowerText = text.toLowerCase();
-  
-  // High-importance patterns that warrant full extraction
+  // Gate 1: Disqualify pure task commands.
+  // If the message leads with a task imperative AND has no positive memory
+  // signals, skip extraction — nothing worth storing in "go scrape xyz".
+  const taskCommandPattern = /^\s*(go|run|execute|fetch|scrape|build|deploy|generate|create|write|open|start|stop|delete|remove|list|show|get|check|test|install|update|upgrade|download|clone|init|make|do|find)\b/i;
+  const memorySignalPattern = /remember|don't forget|keep in mind|note that|important|never|always|must|cannot|decided|decision|prefer|learned|realized|discovered|fixed|bug|error|wrong|incorrect/i;
+
+  if (taskCommandPattern.test(text) && !memorySignalPattern.test(text)) {
+    debugLog(`preFilterImportance: task command disqualified — "${text.slice(0, 80)}"`);
+    return false;
+  }
+
+  // Gate 2: Positive signal matching.
   const highImportancePatterns = [
     // Explicit memory requests
     /remember|don't forget|keep in mind|note that|important/i,
@@ -647,19 +669,16 @@ function preFilterImportance(text: string, threshold: number): boolean {
     // Emphasis
     /!{2,}|[A-Z]{4,}/,
   ];
-  
+
   let matchCount = 0;
   for (const pattern of highImportancePatterns) {
-    if (pattern.test(text)) {
-      matchCount++;
-    }
+    if (pattern.test(text)) matchCount++;
   }
-  
-  // Normalize to 0-1 score: at least 2 patterns for threshold 0.5
+
+  // Normalize to 0-1: at least 2 matches for threshold 0.5
   const score = Math.min(1, matchCount / 4);
-  
   debugLog(`preFilterImportance: matchCount=${matchCount}, score=${score.toFixed(2)}, threshold=${threshold}`);
-  
+
   return score >= threshold;
 }
 

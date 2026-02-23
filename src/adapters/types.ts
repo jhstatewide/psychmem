@@ -175,23 +175,29 @@ export interface OpenCodeCompactionInput {
 }
 
 /**
- * OpenCode message.updated event properties
- * SDK shape: { type: 'message.updated', properties: { info: Message } }
- * Message has sessionID on info directly.
+ * OpenCode chat.message hook input shape.
+ * Fires exactly once per user turn, before the assistant starts responding.
  */
-export interface OpenCodeMessageUpdatedEvent {
-  /** The message info (UserMessage | AssistantMessage) */
-  info?: {
-    id?: string;
-    sessionID?: string;
-    role?: 'user' | 'assistant';
-  };
-  /** Fallback: some older SDK versions put sessionID at top level */
-  sessionID?: string;
-  /** Message ID (legacy, may not be present) */
+export interface OpenCodeChatMessageInput {
+  sessionID: string;
+  agent?: string;
+  model?: { providerID: string; modelID: string };
   messageID?: string;
-  /** Role of the message sender (legacy) */
-  role?: 'user' | 'assistant';
+  variant?: string;
+}
+
+/**
+ * OpenCode chat.message hook output shape (mutable).
+ * Contains the user message and its parts.
+ */
+export interface OpenCodeChatMessageOutput {
+  message: {
+    id: string;
+    sessionID: string;
+    role: 'user';
+    time: { created: number };
+  };
+  parts: OpenCodeMessagePart[];
 }
 
 /**
@@ -200,7 +206,16 @@ export interface OpenCodeMessageUpdatedEvent {
 export interface OpenCodePluginHooks {
   /** Event handler for session lifecycle events */
   event?: (params: { event: OpenCodeEvent }) => Promise<void>;
-  
+
+  /**
+   * Fires exactly once per user turn, before the assistant responds.
+   * Used for lazy memory injection and fire-and-forget per-message extraction.
+   */
+  'chat.message'?: (
+    input: OpenCodeChatMessageInput,
+    output: OpenCodeChatMessageOutput
+  ) => Promise<void>;
+
   /** Hook before tool execution */
   'tool.execute.before'?: (
     input: { tool: string; args: unknown },
