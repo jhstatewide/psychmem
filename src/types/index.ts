@@ -455,7 +455,7 @@ export interface OpenCodeConfig {
   maxSessionStartMemories: number;
   /** Number of recent messages to include for context in per-message extraction (default: 3) */
   messageWindowSize: number;
-  /** Minimum importance threshold for per-message extraction (default: 0.5) */
+  /** Minimum importance threshold for per-message extraction (default: 0.1 ≈ 1 of 7 signal groups) */
   messageImportanceThreshold: number;
 }
 
@@ -536,6 +536,6 @@ export const DEFAULT_CONFIG: PsychMemConfig = {
     maxCompactionMemories: 10,
     maxSessionStartMemories: 10,
     messageWindowSize: 3,    // Include last 3 messages for context
-    messageImportanceThreshold: 0.5,  // Only extract if importance >= 0.5
+    messageImportanceThreshold: 0.1,   // At least 1 of 7 pattern groups must match (1/7 ≈ 0.14)
   },
 };

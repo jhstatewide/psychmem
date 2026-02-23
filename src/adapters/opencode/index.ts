@@ -130,7 +130,7 @@ export function parsePluginConfig(): Partial<PsychMemConfig> {
       maxCompactionMemories:       parseEnvNumber(process.env['PSYCHMEM_MAX_COMPACTION_MEMORIES'],      10),
       maxSessionStartMemories:     parseEnvNumber(process.env['PSYCHMEM_MAX_SESSION_MEMORIES'],         10),
       messageWindowSize:           parseEnvNumber(process.env['PSYCHMEM_MESSAGE_WINDOW_SIZE'],          3),
-      messageImportanceThreshold:  parseEnvFloat (process.env['PSYCHMEM_MESSAGE_IMPORTANCE_THRESHOLD'], 0.5),
+      messageImportanceThreshold:  parseEnvFloat (process.env['PSYCHMEM_MESSAGE_IMPORTANCE_THRESHOLD'], 0.1),
     },
   };
 }
@@ -675,9 +675,10 @@ function preFilterImportance(text: string, threshold: number): boolean {
     if (pattern.test(text)) matchCount++;
   }
 
-  // Normalize to 0-1: at least 2 matches for threshold 0.5
-  const score = Math.min(1, matchCount / 4);
-  debugLog(`preFilterImportance: matchCount=${matchCount}, score=${score.toFixed(2)}, threshold=${threshold}`);
+  // Score as fraction of total pattern groups matched.
+  // threshold=0.15 (default) means at least 1 of 7 groups must match.
+  const score = matchCount / highImportancePatterns.length;
+  debugLog(`preFilterImportance: matchCount=${matchCount}/${highImportancePatterns.length}, score=${score.toFixed(2)}, threshold=${threshold}`);
 
   return score >= threshold;
 }
