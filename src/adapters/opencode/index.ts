@@ -345,9 +345,6 @@ async function handleSessionCreated(
   }
   
   state.currentSessionId = sessionId;
-  // Mark new session injected immediately — injection happens below before returning
-  state.injectedSessions.add(sessionId);
-  debugLog(`state.currentSessionId set to: ${sessionId}`);
   
   // Create session in PsychMem
   const hookInput: HookInput = {
@@ -362,18 +359,6 @@ async function handleSessionCreated(
   };
   
   await state.psychmem.handleHook(hookInput);
-  
-  // Inject relevant memories on session start
-  const memories = await getRelevantMemories(
-    state,
-    state.config.opencode.maxSessionStartMemories
-  );
-  
-  if (memories.length > 0) {
-    const memoryContext = formatMemoriesForInjection(memories, 'session_start', state.worktree);
-    await injectContext(state, sessionId, memoryContext);
-    log(ctx, 'info', `Injected ${memories.length} memories on session start`);
-  }
   
   log(ctx, 'info', `Session started: ${sessionId}`);
 }
@@ -549,9 +534,8 @@ async function handleUserMessage(
     const memories = await getRelevantMemories(state, state.config.opencode.maxSessionStartMemories);
     if (memories.length > 0) {
       const memoryContext = formatMemoriesForInjection(memories, 'session_start', state.worktree);
-      await injectContext(state, sessionId, memoryContext);
-      log(ctx, 'info', `Lazy injection: ${memories.length} memories on continued session`);
-      debugLog(`Lazy injection: injected ${memories.length} memories`);
+      await injectContext(state, sessionId, memoryContext, input.model);
+      log(ctx, 'info', `Lazy injection: ${memories.length} memories on session start`);
     }
   }
 
@@ -866,7 +850,8 @@ function formatMemoriesForInjection(
 async function injectContext(
   state: OpenCodeAdapterState,
   sessionId: string,
-  context: string
+  context: string,
+  model?: { providerID: string; modelID: string }
 ): Promise<void> {
   try {
     await state.client.session.prompt({
@@ -874,6 +859,7 @@ async function injectContext(
       body: {
         noReply: true,
         parts: [{ type: 'text', text: context }],
+        ...(model ? { model } : {}),
       },
     });
   } catch (error) {
