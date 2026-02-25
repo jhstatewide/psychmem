@@ -4,6 +4,12 @@ Psychology-grounded selective memory for AI coding agents.
 
 PsychMem gives AI agents ([OpenCode](https://opencode.ai), [Claude Code](https://docs.anthropic.com/en/docs/claude-code)) persistent memory that works like human memory. Important information consolidates into long-term storage while trivial details naturally decay away, using real cognitive science models.
 
+> **⚠️ Major Refactoring in Progress — Highly Unstable**
+>
+> This plugin is currently undergoing major refactoring and is not suitable for production use. APIs, storage schemas, and behaviour are changing rapidly and without notice. We are working to get this stable as soon as possible as we explore the concept of a human-like memory approach to LLMs — persistent, selective, and psychologically grounded memory that mirrors how humans actually recall and forget information.
+>
+> Use at your own risk. Contributions and feedback are welcome.
+
 ## Experimental
 
 This plugin is under active development. The core memory system works — extraction, scoring, decay, consolidation, and injection across sessions — but comprehensive test coverage is still being built. Expect rough edges. See the [test plan](TEST_PLAN.md) for what's planned.
