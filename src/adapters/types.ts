@@ -45,6 +45,7 @@ export interface OpenCodeClient {
       path: { id: string };
       body: {
         noReply?: boolean;
+        model?: { providerID: string; modelID: string };
         parts: Array<{ type: 'text'; text: string }>;
       };
     }): Promise<unknown>;
