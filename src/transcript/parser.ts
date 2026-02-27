@@ -1,10 +1,10 @@
 /**
- * Transcript Parser for Claude Code
+ * Transcript Parser for JSONL conversation logs
  * 
- * Parses Claude Code's JSONL transcript files incrementally using watermark tracking.
+ * Parses JSONL transcript files incrementally using watermark tracking.
  * The watermark is a byte offset to avoid re-processing already-seen content.
  * 
- * Claude Code transcript format (JSONL):
+ * Transcript format (JSONL):
  * Each line is a JSON object with various message types. Schema is not fully documented,
  * so we use flexible parsing with fallback handling.
  */
@@ -163,7 +163,7 @@ export class TranscriptParser {
 
   /**
    * Parse a single JSONL line into a transcript entry
-   * Handles various Claude Code message formats flexibly
+   * Handles various message formats flexibly
    */
   private parseLine(line: string): TranscriptEntry | null {
     const json = JSON.parse(line) as Record<string, unknown>;
@@ -261,7 +261,7 @@ export class TranscriptParser {
       return json.content;
     }
 
-    // Content array (Claude API format)
+    // Content array format
     if (Array.isArray(json.content)) {
       const textParts: string[] = [];
       

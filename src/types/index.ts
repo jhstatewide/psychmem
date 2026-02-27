@@ -10,7 +10,7 @@
 /**
  * Supported AI agent types
  */
-export type AgentType = 'claude-code' | 'opencode';
+export type AgentType = 'opencode';
 
 // =============================================================================
 // Memory Types (Psychological Framing)
@@ -109,7 +109,7 @@ export interface Session {
   status: 'active' | 'completed' | 'abandoned';
   metadata?: Record<string, unknown> | undefined;
   
-  // Transcript tracking for incremental parsing (Claude Code)
+  // Transcript tracking for incremental parsing
   transcriptPath?: string | undefined;
   transcriptWatermark?: number | undefined; // Byte offset of last processed position
   
@@ -497,7 +497,7 @@ export interface PsychMemConfig {
 }
 
 export const DEFAULT_CONFIG: PsychMemConfig = {
-  agentType: 'claude-code',  // Default for backwards compatibility
+  agentType: 'opencode',
   dbPath: '~/.psychmem/{agentType}/memory.db',  // Template with agent type
   
   stmDecayRate: 0.05,     // ~32-hour half-life (doubled from 0.1)

@@ -6,9 +6,6 @@
   "author": "MGRyko",
   "repository": "https://github.com/muratg98/psychmem",
   "main": "dist/index.js",
-  "claude": {
-    "minVersion": "1.0.0"
-  },
   "keywords": [
     "memory",
     "selective-memory",

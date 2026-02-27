@@ -1,34 +1,38 @@
 # PsychMem
 
-> **⚠️ This package is no longer maintained and should not be used.**
+> **⚠️ This repository is now maintained as a fork by jhstatewide.**
 >
-> After extensive exploration, we concluded that persistent AI memory cannot be solved correctly at the plugin/hook layer. Plugin systems expose only coarse lifecycle events, lack access to underlying session storage, and can only inject context through hacks that pollute conversation history. True memory for AI requires infrastructure-level access — sitting between the user and the model, not bolted on top.
+> This fork drops support for Claude Code and continues PsychMem development for OpenCode.
 >
-> **This work continues properly in [DaySee](#daysee).**
+> Our working theory is that the previously cited limitations do not apply in the same way to OpenCode: its plugin system is richer, and because OpenCode is open source, we can modify integration points where needed instead of treating plugin hooks as fixed constraints.
+>
+> **For users:** this project now targets OpenCode-only workflows.
+>
+> **For contributors:** development continues here under the jhstatewide fork.
 
 ---
 
 ## What We Learned
 
-PsychMem was an attempt to give AI coding agents (OpenCode, Claude Code) persistent memory modelled on cognitive science — dual-store STM/LTM, Ebbinghaus decay curves, BM25 retrieval, psychology-grounded importance scoring.
+PsychMem was an attempt to give AI coding agents persistent memory modelled on cognitive science — dual-store STM/LTM, Ebbinghaus decay curves, BM25 retrieval, psychology-grounded importance scoring.
 
 The memory model itself is sound. The architecture is wrong.
 
-The fundamental problem: OpenCode's plugin API gives you `session.created`, `session.idle`, `session.deleted`, and `experimental.session.compacting`. That's it. You can't intercept individual messages at the model level, you don't have access to how context is assembled per request, and the only way to inject memories is via a fake user message with `noReply: true` — which pollutes the conversation history and is not how memory should work.
+The upstream implementation found real constraints at the plugin/hook layer and reached the conclusion that infrastructure-level control was required.
 
-Every version of PsychMem hit the same ceiling. We rewrote the storage layer (SQLite → markdown vault), rewrote the write strategy (per-message → per-session), rewrote the retrieval (Jaccard similarity → BM25+), and the core limitation remained: **plugin hooks are the wrong abstraction for memory**.
+This fork takes a different position for OpenCode specifically: because OpenCode is open source and has a richer extension surface, we can iterate beyond hook-only limitations and evolve the integration where necessary.
 
 ---
 
-## DaySee
+## Fork Direction
 
-This work continues in **DaySee** — a project building memory at the infrastructure layer, where it actually belongs.
+PsychMem development in this repository now focuses on OpenCode-only support under the jhstatewide fork.
 
-[![Watch the beta demo](#)](#)
+What this means in practice:
 
-<!-- Replace # with the actual video URL when available -->
-
-DaySee sits at the model layer rather than the plugin layer, giving it the access required to build memory that actually works across sessions, models, and tools.
+1. Drop Claude Code compatibility and related assumptions
+2. Lean on OpenCode's richer plugin architecture
+3. Patch or extend OpenCode integration points directly when needed
 
 ---
 

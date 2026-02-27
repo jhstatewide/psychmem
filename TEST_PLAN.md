@@ -270,11 +270,11 @@
 
 | Test | What it verifies |
 |------|-----------------|
-| `transformClaudeCodeInput()` transforms raw Claude Code JSON to HookInput | Input transformation |
-| `handleHook()` SessionStart outputs `{ hookSpecificOutput: { hookEventName, additionalContext } }` | Output format |
-| `handleHook()` Stop/SessionEnd outputs `{ continue: true }` | Non-blocking output |
+| `normalizeHookInput()` accepts valid HookInput JSON | Input validation |
+| `normalizeHookInput()` rejects unsupported legacy payload shapes | OpenCode-only enforcement |
+| `handleHook()` outputs serialized PsychMem hook result | Output format |
 | `handleHook()` with invalid JSON writes error to stderr, exits 0 | Error handling |
-| `--agent claude-code` flag sets agent type correctly | Agent flag parsing |
+| `install` accepts no flags or `--opencode` | Install flag validation |
 
 ### 18. `src/core.test.ts` — PsychMem facade
 
@@ -287,14 +287,7 @@
 | `pinMemory()` / `forgetMemory()` work through facade | Feedback pass-through |
 | `applyDecay()` / `runConsolidation()` accessible via facade | Maintenance methods |
 
-### 19. `src/adapters/claude-code/index.test.ts` — ClaudeCodeAdapter
-
-| Test | What it verifies |
-|------|-----------------|
-| `writeToAutoMemory()` writes a markdown file | File output |
-| Auto-memory file content matches expected format | Format validation |
-
-### 20. `src/index.test.ts` — Plugin entry point
+### 19. `src/index.test.ts` — Plugin entry point
 
 | Test | What it verifies |
 |------|-----------------|
@@ -311,13 +304,13 @@
 | **P1 — Memory** | `patterns.test.ts`, `structural-analyzer.test.ts`, `context-sweep.test.ts`, `selective-memory.test.ts` | The extraction pipeline is the brain |
 | **P2 — Hooks** | `hooks/index.test.ts`, `session-start.test.ts`, `stop.test.ts`, `session-end.test.ts`, `post-tool-use.test.ts` | Integration points |
 | **P3 — Retrieval** | `retrieval/index.test.ts`, `transcript/*.test.ts` | Search & parsing |
-| **P4 — Edge** | `types/index.test.ts`, `utils/paths.test.ts`, `sqlite-adapter.test.ts`, `cli.test.ts`, `index.test.ts`, `claude-code/index.test.ts` | Support & safety |
+| **P4 — Edge** | `types/index.test.ts`, `utils/paths.test.ts`, `sqlite-adapter.test.ts`, `cli.test.ts`, `index.test.ts` | Support & safety |
 
 ---
 
 ## Estimated Scope
 
-- **20 test files**, ~130 individual test cases
+- **19 test files**, ~120-130 individual test cases
 - All using `node:test` + `node:assert`
 - Each file self-contained with temp database setup/teardown
 - Total estimated effort: ~1,500-2,000 lines of test code
