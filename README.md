@@ -9,6 +9,8 @@
 > **For users:** this project now targets OpenCode-only workflows.
 >
 > **For contributors:** development continues here under the jhstatewide fork.
+>
+> This repository is a fork of the original PsychMem project: https://github.com/muratg98/psychmem
 
 ---
 

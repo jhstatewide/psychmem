@@ -466,7 +466,7 @@ EXAMPLES:
   # View stats
   psychmem stats
 
-For more information, see: https://github.com/muratg98/psychmem
+For more information, see: https://github.com/jhstatewide/psychmem
 `);
 }
 

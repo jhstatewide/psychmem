@@ -1,7 +1,7 @@
 {
   "name": "psychmem",
   "version": "1.0.10",
-  "description": "Psych-grounded selective memory system for AI agents with STM/LTM consolidation, decay curves, and learned importance weights",
+  "description": "Fork of muratg98/psychmem: psych-grounded selective memory system for AI agents with STM/LTM consolidation, decay curves, and learned importance weights",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -55,7 +55,12 @@
     "agent-memory",
     "opencode"
   ],
-  "author": "muratg98",
+  "author": "jharding_npm",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jhstatewide/psychmem.git"
+  },
+  "homepage": "https://github.com/jhstatewide/psychmem",
   "license": "MIT",
   "files": [
     "dist",
