@@ -45,6 +45,7 @@ const _psychmemDir = join(homedir(), '.psychmem');
 const _logFile = join(_psychmemDir, 'plugin-debug.log');
 const _logFileOld = join(_psychmemDir, 'plugin-debug.log.1');
 const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const PSYCHMEM_DISPLAY_VERSION = '1.0.11';
 
 if (!existsSync(_psychmemDir)) {
   try { mkdirSync(_psychmemDir, { recursive: true }); } catch (_) { /* ignore */ }
@@ -150,6 +151,7 @@ interface OpenCodeAdapterState {
   injectedSessions: Set<string>;
   worktree: string;
   client: OpenCodeClient;
+  currentModel: { providerID: string; modelID: string } | null;
 }
 
 /**
@@ -187,6 +189,7 @@ export async function createOpenCodePlugin(
     injectedSessions: new Set<string>(),
     worktree,
     client: ctx.client,
+    currentModel: null,
   };
   
   // Log initialization
@@ -345,8 +348,6 @@ async function handleSessionCreated(
   }
   
   state.currentSessionId = sessionId;
-  // Mark new session injected immediately — injection happens below before returning
-  state.injectedSessions.add(sessionId);
   debugLog(`state.currentSessionId set to: ${sessionId}`);
   
   // Create session in PsychMem
@@ -363,17 +364,10 @@ async function handleSessionCreated(
   
   await state.psychmem.handleHook(hookInput);
   
-  // Inject relevant memories on session start
-  const memories = await getRelevantMemories(
-    state,
-    state.config.opencode.maxSessionStartMemories
-  );
-  
-  if (memories.length > 0) {
-    const memoryContext = formatMemoriesForInjection(memories, 'session_start', state.worktree);
-    await injectContext(state, sessionId, memoryContext);
-    log(ctx, 'info', `Injected ${memories.length} memories on session start`);
-  }
+  // Do NOT inject here. Injecting via session.prompt before model selection can
+  // cause OpenCode to fall back to a default model. We defer injection to the
+  // first chat.message, where input.model is available and forwarded.
+  debugLog(`Deferring memory injection until first chat.message for session ${sessionId}`);
   
   log(ctx, 'info', `Session started: ${sessionId}`);
 }
@@ -538,6 +532,9 @@ async function handleUserMessage(
   if (!state.currentSessionId) {
     state.currentSessionId = sessionId;
   }
+  if (input.model) {
+    state.currentModel = input.model;
+  }
 
   // --- LAZY INJECTION ---
   // For continued sessions (-c) that never fire session.created, inject memories
@@ -549,9 +546,14 @@ async function handleUserMessage(
     const memories = await getRelevantMemories(state, state.config.opencode.maxSessionStartMemories);
     if (memories.length > 0) {
       const memoryContext = formatMemoriesForInjection(memories, 'session_start', state.worktree);
-      await injectContext(state, sessionId, memoryContext);
-      log(ctx, 'info', `Lazy injection: ${memories.length} memories on continued session`);
-      debugLog(`Lazy injection: injected ${memories.length} memories`);
+      const injected = await injectContext(state, sessionId, memoryContext);
+      if (injected) {
+        log(ctx, 'info', `Lazy injection: ${memories.length} memories on continued session`);
+        debugLog(`Lazy injection: injected ${memories.length} memories`);
+      } else {
+        state.injectedSessions.delete(sessionId);
+        debugLog(`Lazy injection: deferred (no model available) for session ${sessionId}`);
+      }
     }
   }
 
@@ -738,8 +740,8 @@ function extractConversationText(messages: OpenCodeMessageContainer[]): string {
   // Headers used for injected memory blocks — must be stripped to prevent
   // memories from re-extracting themselves in a feedback loop
   const MEMORY_BLOCK_HEADERS = [
-    '## Relevant Memories from Previous Sessions',
-    '## Preserved Memories (from PsychMem)',
+    '## Relevant Memories from Previous Sessions (PsychMem v',
+    '## Preserved Memories (from PsychMem v',
   ];
 
   for (const msg of messages) {
@@ -800,8 +802,8 @@ function formatMemoriesForInjection(
   currentProject?: string
 ): string {
   const header = context === 'session_start'
-    ? '## Relevant Memories from Previous Sessions'
-    : '## Preserved Memories (from PsychMem)';
+    ? `## Relevant Memories from Previous Sessions (PsychMem v${PSYCHMEM_DISPLAY_VERSION})`
+    : `## Preserved Memories (from PsychMem v${PSYCHMEM_DISPLAY_VERSION})`;
   
   const lines: string[] = [header, ''];
   
@@ -867,18 +869,28 @@ async function injectContext(
   state: OpenCodeAdapterState,
   sessionId: string,
   context: string
-): Promise<void> {
+): Promise<boolean> {
   try {
+    // Guard: never inject without an explicit model, otherwise OpenCode can
+    // switch the session to a default model.
+    if (!state.currentModel) {
+      debugLog(`injectContext skipped: no currentModel for session ${sessionId}`);
+      return false;
+    }
+
     await state.client.session.prompt({
       path: { id: sessionId },
       body: {
         noReply: true,
+        model: state.currentModel,
         parts: [{ type: 'text', text: context }],
       },
     });
+    return true;
   } catch (error) {
     // Context injection is best-effort
     console.error('Failed to inject context:', error);
+    return false;
   }
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "psychmem",
-  "version": "1.0.10",
-  "description": "Psych-grounded selective memory system for AI agents with STM/LTM consolidation, decay curves, and learned importance weights",
+  "version": "1.0.11",
+  "description": "Fork of muratg98/psychmem: psych-grounded selective memory system for AI agents with STM/LTM consolidation, decay curves, and learned importance weights",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -39,10 +39,6 @@
     "./adapters/opencode": {
       "types": "./dist/adapters/opencode/index.d.ts",
       "import": "./dist/adapters/opencode/index.js"
-    },
-    "./adapters/claude-code": {
-      "types": "./dist/adapters/claude-code/index.d.ts",
-      "import": "./dist/adapters/claude-code/index.js"
     }
   },
   "scripts": {
@@ -57,15 +53,17 @@
     "psychology",
     "cognitive-architecture",
     "agent-memory",
-    "claude-code",
     "opencode"
   ],
-  "author": "muratg98",
+  "author": "jharding_npm",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jhstatewide/psychmem.git"
+  },
+  "homepage": "https://github.com/jhstatewide/psychmem",
   "license": "MIT",
   "files": [
-    ".claude-plugin",
     "dist",
-    "hooks",
     "plugin.js",
     "plugin.json",
     "README.md"
