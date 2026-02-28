@@ -58,8 +58,6 @@ function parseEnvFloat(value: string | undefined, defaultValue: number): number 
  * Plugin entry point - named export as required by OpenCode
  */
 export const PsychMemPlugin = async (ctx: OpenCodePluginContext): Promise<OpenCodePluginHooks> => {
-  console.log('[PsychMem] Initializing plugin...');
-  
   // Load configuration from environment
   const config = {
     opencode: {
@@ -104,8 +102,6 @@ export const PsychMemPlugin = async (ctx: OpenCodePluginContext): Promise<OpenCo
   
   try {
     const hooks = await createOpenCodePlugin(ctx, config);
-    console.log('[PsychMem] Plugin initialized successfully');
-    console.log('[PsychMem] Per-message extraction:', config.opencode?.extractOnUserMessage ? 'enabled' : 'disabled');
     return hooks;
   } catch (error) {
     console.error('[PsychMem] Failed to initialize:', error);
