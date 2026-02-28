@@ -47,6 +47,12 @@ const _psychmemDir = join(homedir(), '.psychmem');
 const _logFile = join(_psychmemDir, 'plugin-debug.log');
 const _logFileOld = join(_psychmemDir, 'plugin-debug.log.1');
 const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const PSYCHMEM_DEBUG_ENABLED = (() => {
+  const value = process.env['PSYCHMEM_DEBUG'];
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+})();
 const PSYCHMEM_DISPLAY_VERSION = '1.0.12';
 const RUMINATE_CLASSIFICATIONS: MemoryClassification[] = [
   'episodic',
@@ -64,6 +70,8 @@ if (!existsSync(_psychmemDir)) {
 }
 
 function debugLog(msg: string): void {
+  if (!PSYCHMEM_DEBUG_ENABLED) return;
+
   const ts = new Date().toISOString();
   const line = `[${ts}] [adapter] ${msg}\n`;
   // Fire-and-forget: rotate then append asynchronously (no blocking)
@@ -211,7 +219,7 @@ export async function createOpenCodePlugin(
   
   // Log initialization
   debugLog(`PsychMem initialized — worktree=${ctx.worktree}, directory=${ctx.directory}, resolved project=${worktree}`);
-  log(ctx, 'info', `PsychMem initialized for project: ${worktree}`);
+  log(ctx, 'debug', `PsychMem initialized for project: ${worktree}`);
   
   return {
     /**
@@ -1168,6 +1176,8 @@ function log(
   message: string,
   extra?: unknown
 ): void {
+  if (level === 'debug' && !PSYCHMEM_DEBUG_ENABLED) return;
+
   try {
     if (ctx?.client?.app?.log) {
       ctx.client.app.log({
