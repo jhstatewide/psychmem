@@ -170,6 +170,7 @@ function parseEnvFloat(value, defaultValue) {
 export const PsychMem = async (ctx) => {
   const config = {
     opencode: {
+      injectOnSessionStart: parseEnvBool(process.env.PSYCHMEM_INJECT_ON_SESSION_START, true),
       injectOnCompaction: parseEnvBool(process.env.PSYCHMEM_INJECT_ON_COMPACTION, true),
       extractOnCompaction: parseEnvBool(process.env.PSYCHMEM_EXTRACT_ON_COMPACTION, true),
       extractOnMessage: parseEnvBool(process.env.PSYCHMEM_EXTRACT_ON_MESSAGE, true),

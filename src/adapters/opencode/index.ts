@@ -137,6 +137,7 @@ function parseEnvFloat(value: string | undefined, defaultValue: number): number 
 export function parsePluginConfig(): Partial<PsychMemConfig> {
   return {
     opencode: {
+      injectOnSessionStart:        parseEnvBool  (process.env['PSYCHMEM_INJECT_ON_SESSION_START'],      true),
       injectOnCompaction:          parseEnvBool  (process.env['PSYCHMEM_INJECT_ON_COMPACTION'],         true),
       extractOnCompaction:         parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_COMPACTION'],        true),
       extractOnUserMessage:        parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_USER_MESSAGE'] ?? process.env['PSYCHMEM_EXTRACT_ON_MESSAGE'], true),
@@ -648,7 +649,7 @@ async function handleUserMessage(
   // For continued sessions (-c) that never fire session.created, inject memories
   // on the first chat.message of the session. Awaited before extraction to avoid
   // concurrent DB writes.
-  if (!state.injectedSessions.has(sessionId)) {
+  if (state.config.opencode.injectOnSessionStart && !state.injectedSessions.has(sessionId)) {
     state.injectedSessions.add(sessionId);
     debugLog(`Lazy injection: first user message in session ${sessionId}`);
     const memories = await getRelevantMemories(state, state.config.opencode.maxSessionStartMemories);

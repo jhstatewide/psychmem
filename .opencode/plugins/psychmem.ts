@@ -13,6 +13,7 @@
  * - Incremental processing with message watermarking
  * 
  * Configuration (via environment variables):
+ * - PSYCHMEM_INJECT_ON_SESSION_START: Enable memory injection on first message in a session (default: true)
  * - PSYCHMEM_INJECT_ON_COMPACTION: Enable memory injection during compaction (default: true)
  * - PSYCHMEM_EXTRACT_ON_COMPACTION: Enable memory extraction during compaction (default: true)
  * - PSYCHMEM_EXTRACT_ON_MESSAGE: Enable per-message memory extraction (default: true)
@@ -25,7 +26,6 @@
 // Use compiled dist files (works better with Bun's module resolution)
 import type { OpenCodePluginContext, OpenCodePluginHooks } from '../../dist/adapters/types.js';
 import { createOpenCodePlugin } from '../../dist/adapters/opencode/index.js';
-import type { PsychMemConfig } from '../../dist/types/index.js';
 
 /**
  * Parse boolean environment variable
@@ -60,8 +60,12 @@ export const PsychMemPlugin = async (ctx: OpenCodePluginContext): Promise<OpenCo
   console.log('[PsychMem] Initializing plugin...');
   
   // Load configuration from environment
-  const config: Partial<PsychMemConfig> = {
+  const config = {
     opencode: {
+      injectOnSessionStart: parseEnvBool(
+        process.env.PSYCHMEM_INJECT_ON_SESSION_START,
+        true
+      ),
       injectOnCompaction: parseEnvBool(
         process.env.PSYCHMEM_INJECT_ON_COMPACTION,
         true
