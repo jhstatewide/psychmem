@@ -445,6 +445,8 @@ export const DEFAULT_SWEEP_CONFIG: SweepConfig = {
 export interface OpenCodeConfig {
   /** Inject memories on first user message in a session (default: true) */
   injectOnSessionStart: boolean;
+  /** Inject one-time hint about the ruminate tool on first user message (default: true) */
+  ruminateHint: boolean;
   /** Inject memories into compaction context (default: true) */
   injectOnCompaction: boolean;
   /** Extract memories from conversation before compaction (default: true) */
@@ -533,6 +535,7 @@ export const DEFAULT_CONFIG: PsychMemConfig = {
   // OpenCode-specific defaults
   opencode: {
     injectOnSessionStart: true,
+    ruminateHint: true,
     injectOnCompaction: true,
     extractOnCompaction: true,
     extractOnUserMessage: true,  // Per-user-message extraction via chat.message hook

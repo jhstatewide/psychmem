@@ -38,6 +38,24 @@ What this means in practice:
 
 ---
 
+## OpenCode Config
+
+PsychMem's OpenCode adapter supports environment-based config. Two session-start controls are now available:
+
+- `PSYCHMEM_INJECT_ON_SESSION_START` (default: `true`): injects relevant memories on the first user message in a session.
+- `PSYCHMEM_RUMINATE_HINT` (default: `true`): injects a one-time guidance hint telling the agent it can use the `ruminate` tool for memory recall.
+
+Example:
+
+```bash
+export PSYCHMEM_INJECT_ON_SESSION_START=true
+export PSYCHMEM_RUMINATE_HINT=true
+```
+
+If you prefer to reduce startup context noise, disable either option by setting it to `false`.
+
+---
+
 ## Original Concept
 
 The original PsychMem concept — psychology-grounded selective memory with decay, consolidation, and scoped injection — remains the design goal. The research references below informed the model:

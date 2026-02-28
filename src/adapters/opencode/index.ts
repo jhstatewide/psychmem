@@ -138,6 +138,7 @@ export function parsePluginConfig(): Partial<PsychMemConfig> {
   return {
     opencode: {
       injectOnSessionStart:        parseEnvBool  (process.env['PSYCHMEM_INJECT_ON_SESSION_START'],      true),
+      ruminateHint:                parseEnvBool  (process.env['PSYCHMEM_RUMINATE_HINT'],                true),
       injectOnCompaction:          parseEnvBool  (process.env['PSYCHMEM_INJECT_ON_COMPACTION'],         true),
       extractOnCompaction:         parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_COMPACTION'],        true),
       extractOnUserMessage:        parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_USER_MESSAGE'] ?? process.env['PSYCHMEM_EXTRACT_ON_MESSAGE'], true),
@@ -162,6 +163,8 @@ interface OpenCodeAdapterState {
   currentSessionId: string | null;
   /** Sessions that have already received a memory injection this process lifetime */
   injectedSessions: Set<string>;
+  /** Sessions that have already received one-time ruminate tool hint */
+  ruminateHintSessions: Set<string>;
   worktree: string;
   client: OpenCodeClient;
   currentModel: { providerID: string; modelID: string } | null;
@@ -200,6 +203,7 @@ export async function createOpenCodePlugin(
     config,
     currentSessionId: null,
     injectedSessions: new Set<string>(),
+    ruminateHintSessions: new Set<string>(),
     worktree,
     client: ctx.client,
     currentModel: null,
@@ -663,6 +667,25 @@ async function handleUserMessage(
         state.injectedSessions.delete(sessionId);
         debugLog(`Lazy injection: deferred (no model available) for session ${sessionId}`);
       }
+    }
+  }
+
+  // Optional one-time hint for memory discoverability.
+  if (state.config.opencode.ruminateHint && !state.ruminateHintSessions.has(sessionId)) {
+    state.ruminateHintSessions.add(sessionId);
+
+    const hintText = [
+      'PsychMem tip: You can retrieve prior context with the `ruminate` tool.',
+      'Use it selectively for follow-ups, preferences, or earlier decisions.',
+      'Start with `scope: project` and broaden only if needed.',
+    ].join('\n');
+
+    const injected = await injectContext(state, sessionId, hintText);
+    if (!injected) {
+      state.ruminateHintSessions.delete(sessionId);
+      debugLog(`Ruminate hint: deferred (no model available) for session ${sessionId}`);
+    } else {
+      debugLog(`Ruminate hint: injected for session ${sessionId}`);
     }
   }
 

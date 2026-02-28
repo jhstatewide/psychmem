@@ -14,6 +14,7 @@
  * 
  * Configuration (via environment variables):
  * - PSYCHMEM_INJECT_ON_SESSION_START: Enable memory injection on first message in a session (default: true)
+ * - PSYCHMEM_RUMINATE_HINT: Inject one-time hint about the ruminate tool on first message (default: true)
  * - PSYCHMEM_INJECT_ON_COMPACTION: Enable memory injection during compaction (default: true)
  * - PSYCHMEM_EXTRACT_ON_COMPACTION: Enable memory extraction during compaction (default: true)
  * - PSYCHMEM_EXTRACT_ON_MESSAGE: Enable per-message memory extraction (default: true)
@@ -64,6 +65,10 @@ export const PsychMemPlugin = async (ctx: OpenCodePluginContext): Promise<OpenCo
     opencode: {
       injectOnSessionStart: parseEnvBool(
         process.env.PSYCHMEM_INJECT_ON_SESSION_START,
+        true
+      ),
+      ruminateHint: parseEnvBool(
+        process.env.PSYCHMEM_RUMINATE_HINT,
         true
       ),
       injectOnCompaction: parseEnvBool(

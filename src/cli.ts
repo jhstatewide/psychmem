@@ -171,6 +171,7 @@ export const PsychMem = async (ctx) => {
   const config = {
     opencode: {
       injectOnSessionStart: parseEnvBool(process.env.PSYCHMEM_INJECT_ON_SESSION_START, true),
+      ruminateHint: parseEnvBool(process.env.PSYCHMEM_RUMINATE_HINT, true),
       injectOnCompaction: parseEnvBool(process.env.PSYCHMEM_INJECT_ON_COMPACTION, true),
       extractOnCompaction: parseEnvBool(process.env.PSYCHMEM_EXTRACT_ON_COMPACTION, true),
       extractOnMessage: parseEnvBool(process.env.PSYCHMEM_EXTRACT_ON_MESSAGE, true),
