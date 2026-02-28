@@ -1,6 +1,6 @@
 {
   "name": "psychmem",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "description": "Fork of muratg98/psychmem: psych-grounded selective memory system for AI agents with STM/LTM consolidation, decay curves, and learned importance weights",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

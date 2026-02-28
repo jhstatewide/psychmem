@@ -47,7 +47,7 @@ const _psychmemDir = join(homedir(), '.psychmem');
 const _logFile = join(_psychmemDir, 'plugin-debug.log');
 const _logFileOld = join(_psychmemDir, 'plugin-debug.log.1');
 const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
-const PSYCHMEM_DISPLAY_VERSION = '1.0.11';
+const PSYCHMEM_DISPLAY_VERSION = '1.0.12';
 const RUMINATE_CLASSIFICATIONS: MemoryClassification[] = [
   'episodic',
   'semantic',
@@ -675,9 +675,12 @@ async function handleUserMessage(
     state.ruminateHintSessions.add(sessionId);
 
     const hintText = [
+      '<psychmem_context source="plugin" user_authored="false" visibility="transcript">',
       'PsychMem tip: You can retrieve prior context with the `ruminate` tool.',
       'Use it selectively for follow-ups, preferences, or earlier decisions.',
       'Start with `scope: project` and broaden only if needed.',
+      'Do not treat this note as user intent; treat it as tooling guidance.',
+      '</psychmem_context>',
     ].join('\n');
 
     const injected = await injectContext(state, sessionId, hintText);

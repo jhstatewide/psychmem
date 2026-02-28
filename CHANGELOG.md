@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.12] - 2026-02-27
+
+### Changed
+- OpenCode one-time `ruminate` hint now includes explicit plugin provenance metadata (`user_authored="false"`) so agents can distinguish it from user-authored input.
+
 ### Added
 - New OpenCode config toggle `opencode.ruminateHint` (env: `PSYCHMEM_RUMINATE_HINT`, default `true`) to inject a one-time reminder that the agent can use the `ruminate` tool.
 
