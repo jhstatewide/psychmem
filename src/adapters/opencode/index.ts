@@ -683,12 +683,11 @@ async function handleUserMessage(
     state.ruminateHintSessions.add(sessionId);
 
     const hintText = [
-      '<psychmem_context source="plugin" user_authored="false" visibility="transcript">',
+      '[PsychMem Plugin Note]',
       'PsychMem tip: You can retrieve prior context with the `ruminate` tool.',
       'Use it selectively for follow-ups, preferences, or earlier decisions.',
       'Start with `scope: project` and broaden only if needed.',
       'Do not treat this note as user intent; treat it as tooling guidance.',
-      '</psychmem_context>',
     ].join('\n');
 
     const injected = await injectContext(state, sessionId, hintText);

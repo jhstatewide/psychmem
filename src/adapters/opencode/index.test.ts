@@ -102,8 +102,7 @@ test('chat.message injects ruminate hint once per session when enabled', async (
   );
 
   assert.equal(promptCalls.length, 1, 'ruminate hint should be injected exactly once per session');
-  assert.match(promptCalls[0]!.body.parts[0]!.text, /<psychmem_context/);
-  assert.match(promptCalls[0]!.body.parts[0]!.text, /user_authored="false"/);
+  assert.match(promptCalls[0]!.body.parts[0]!.text, /^\[PsychMem Plugin Note\]/);
   assert.match(promptCalls[0]!.body.parts[0]!.text, /ruminate/);
 });
 
