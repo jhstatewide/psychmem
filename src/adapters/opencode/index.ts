@@ -8,6 +8,7 @@
  */
 
 import { mkdirSync, existsSync, statSync, renameSync } from 'fs';
+import { tool } from '@opencode-ai/plugin/tool';
 import { appendFile } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -27,12 +28,13 @@ import type {
 import type {
   PsychMemConfig,
   MemoryUnit,
+  MemoryClassification,
   HookInput,
   StopData,
   PostToolUseData,
   SessionStartData,
 } from '../../types/index.js';
-import { DEFAULT_CONFIG, getScopeForClassification } from '../../types/index.js';
+import { DEFAULT_CONFIG, USER_LEVEL_CLASSIFICATIONS } from '../../types/index.js';
 import { PsychMem, createPsychMem } from '../../core.js';
 import { MemoryDatabase, createMemoryDatabase } from '../../storage/database.js';
 import { MemoryRetrieval } from '../../retrieval/index.js';
@@ -46,6 +48,16 @@ const _logFile = join(_psychmemDir, 'plugin-debug.log');
 const _logFileOld = join(_psychmemDir, 'plugin-debug.log.1');
 const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 const PSYCHMEM_DISPLAY_VERSION = '1.0.11';
+const RUMINATE_CLASSIFICATIONS: MemoryClassification[] = [
+  'episodic',
+  'semantic',
+  'procedural',
+  'bugfix',
+  'learning',
+  'preference',
+  'decision',
+  'constraint',
+];
 
 if (!existsSync(_psychmemDir)) {
   try { mkdirSync(_psychmemDir, { recursive: true }); } catch (_) { /* ignore */ }
@@ -328,6 +340,102 @@ export async function createOpenCodePlugin(
           debugLog(`Compaction prompt set (no memories to inject)`);
         }
       }
+    },
+    tool: {
+      ruminate: tool({
+        description: 'Search PsychMem memories by semantic relevance',
+        args: {
+          query: tool.schema.string().describe('Search query text'),
+          scope: tool.schema
+            .enum(['all', 'user', 'project'])
+            .optional()
+            .default('all')
+            .describe('all|user|project (default: all)'),
+          classification: tool.schema
+            .enum(RUMINATE_CLASSIFICATIONS as [
+              'episodic',
+              'semantic',
+              'procedural',
+              'bugfix',
+              'learning',
+              'preference',
+              'decision',
+              'constraint',
+            ])
+            .optional()
+            .describe('Optional memory classification filter'),
+          limit: tool.schema
+            .number()
+            .int()
+            .optional()
+            .default(5)
+            .describe('Result limit (clamped to 1..20, default: 5)'),
+        },
+        async execute(args) {
+          try {
+            const query = args.query.trim();
+            if (!query) {
+              return 'No query provided. Pass a non-empty query string.';
+            }
+
+            const scope = args.scope ?? 'all';
+            const limit = Math.max(1, Math.min(20, args.limit ?? 5));
+            const poolLimit = Math.max(limit * 10, 50);
+
+            debugLog(`ruminate: query="${query}", scope=${scope}, classification=${args.classification ?? 'none'}, limit=${limit}`);
+
+            let memoryIds: string[];
+            if (scope === 'project') {
+              memoryIds = state.db
+                .getProjectMemories(state.worktree, 200)
+                .map(memory => memory.id);
+            } else if (scope === 'user') {
+              memoryIds = state.db
+                .getUserLevelMemories(200)
+                .map(memory => memory.id);
+            } else {
+              memoryIds = state.db
+                .getTopMemories(200)
+                .map(memory => memory.id);
+            }
+
+            const allowedIds = new Set(memoryIds);
+            const classificationFilter = args.classification
+              ? [args.classification]
+              : scope === 'user'
+                ? USER_LEVEL_CLASSIFICATIONS
+                : undefined;
+
+            const ranked = classificationFilter
+              ? state.retrieval.search(
+                  query,
+                  { classifications: classificationFilter },
+                  poolLimit
+                )
+              : state.retrieval.search(query, undefined, poolLimit);
+
+            const results = ranked
+              .filter(item => allowedIds.has(item.id))
+              .slice(0, limit);
+
+            if (results.length === 0) {
+              const filterText = args.classification ? `, classification=${args.classification}` : '';
+              return `No memories found for query "${query}" (scope=${scope}${filterText}).`;
+            }
+
+            const lines = results.map((item, index) => {
+              const store = item.store === 'ltm' ? 'LTM' : 'STM';
+              return `${index + 1}. [${store}] [${item.classification}] ${item.summary}`;
+            });
+
+            return lines.join('\n');
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            debugLog(`ruminate error: ${message}`);
+            return `Unable to search memories right now: ${message}`;
+          }
+        },
+      }),
     },
   };
 }
