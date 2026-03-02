@@ -146,7 +146,7 @@ export function parsePluginConfig(): Partial<PsychMemConfig> {
   return {
     opencode: {
       injectOnSessionStart:        parseEnvBool  (process.env['PSYCHMEM_INJECT_ON_SESSION_START'],      true),
-      ruminateHint:                parseEnvBool  (process.env['PSYCHMEM_RUMINATE_HINT'],                true),
+      ruminateHint:                parseEnvBool  (process.env['PSYCHMEM_RUMINATE_HINT'],                false),
       injectOnCompaction:          parseEnvBool  (process.env['PSYCHMEM_INJECT_ON_COMPACTION'],         true),
       extractOnCompaction:         parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_COMPACTION'],        true),
       extractOnUserMessage:        parseEnvBool  (process.env['PSYCHMEM_EXTRACT_ON_USER_MESSAGE'] ?? process.env['PSYCHMEM_EXTRACT_ON_MESSAGE'], true),

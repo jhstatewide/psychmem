@@ -4,6 +4,9 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- OpenCode `opencode.ruminateHint` now defaults to `false` (env: `PSYCHMEM_RUMINATE_HINT`) so the startup tool announcement is opt-in instead of injected by default.
+
 ## [1.0.12] - 2026-02-27
 
 ### Changed
